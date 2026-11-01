@@ -41,8 +41,12 @@ if mode == "Análise Individual (Live Demo)":
 
     if st.button("🚀 Executar Triagem & RCA", type="primary"):
         with st.spinner("Analisando log com guardrails Pydantic..."):
-            result = analyze_log(log_input)
+            st.session_state["analysis_result"] = analyze_log(log_input)
+            st.session_state["executed_actions"] = {}
 
+    # Renderiza o resultado persistido na sessão
+    if "analysis_result" in st.session_state:
+        result = st.session_state["analysis_result"]
         st.success("Análise concluída e validada pelo Pydantic Schema!")
 
         # Métrica de ROI Operacional
@@ -66,6 +70,9 @@ if mode == "Análise Individual (Live Demo)":
         if result.requires_human_intervention:
             st.warning("⚠️ **Guardrail HITL Ativo:** Ações críticas exigem aprovação explícita do operador.")
 
+        if "executed_actions" not in st.session_state:
+            st.session_state["executed_actions"] = {}
+
         for idx, action in enumerate(result.recommended_actions):
             with st.expander(f"Ação #{idx+1}: {action.action_type.value} - {action.description}", expanded=True):
                 st.write(f"**Requer Validação Humana?** {'🔴 SIM (Trava HITL Ativa)' if action.requires_human_approval else '🟢 NÃO (Automação Direta)'}")
@@ -75,9 +82,14 @@ if mode == "Análise Individual (Live Demo)":
                     st.json(action.payload)
 
                 if action.requires_human_approval:
-                    if st.button(f"✅ Aprovar & Executar Ação #{idx+1}", key=f"btn_approve_{idx}"):
-                        st.balloons()
-                        st.success(f"Ação [{action.action_type.value}] APROVADA por Tiago Saturnino e enviada para execução!")
+                    btn_key = f"btn_approve_{idx}"
+                    if st.session_state["executed_actions"].get(idx, False):
+                        st.success(f"✅ Ação [{action.action_type.value}] APROVADA por Tiago Saturnino e Executada com Sucesso!")
+                    else:
+                        if st.button(f"✅ Aprovar & Executar Ação #{idx+1}", key=btn_key):
+                            st.session_state["executed_actions"][idx] = True
+                            st.balloons()
+                            st.rerun()
 
         with st.expander("📄 Ver Saída JSON Estruturada (Pydantic Schema)"):
             st.json(result.model_dump())
@@ -91,7 +103,6 @@ else:
 
     uploaded_file = st.file_uploader("Carregar arquivo CSV de logs", type=["csv"])
 
-    # Exemplo de CSV rápido se não subir arquivo
     if st.checkbox("Usar dados de exemplo em lote"):
         sample_data = {
             "log_id": ["LOG-001", "LOG-002", "LOG-003"],
@@ -116,6 +127,5 @@ else:
             st.markdown("#### 📈 Resultado da Triagem Agrupada")
             st.dataframe(df_results, use_container_width=True)
 
-            # Resumo visual
             st.markdown("##### Distribuição de Severidade")
             st.bar_chart(df_results["Severidade"].value_counts())
