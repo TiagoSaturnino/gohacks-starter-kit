@@ -1,6 +1,6 @@
 ﻿from enum import Enum
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 class SeverityLevel(str, Enum):
     LOW = "LOW"
@@ -12,55 +12,48 @@ class ActionType(str, Enum):
     REFRESH_TOKEN = "REFRESH_TOKEN"
     RETRY_WEBHOOK = "RETRY_WEBHOOK"
     CLEAR_CACHE = "CLEAR_CACHE"
-    NOTIFY_TEAM = "NOTIFY_TEAM"
     ESCALATE_HUMAN = "ESCALATE_HUMAN"
+    LOG_ONLY = "LOG_ONLY"
+
+MUTATING_ACTIONS = {
+    ActionType.REFRESH_TOKEN,
+    ActionType.RETRY_WEBHOOK,
+    ActionType.CLEAR_CACHE
+}
 
 class RecommendedAction(BaseModel):
-    action_type: ActionType = Field(
-        ..., 
-        description="Tipo de ação corretiva a ser tomada."
-    )
-    description: str = Field(
-        ..., 
-        description="Explicação sucinta do que esta ação fará."
-    )
+    model_config = ConfigDict(extra="forbid")
+    
+    action_type: ActionType = Field(description="Tipo de ação recomendada")
+    description: str = Field(description="Descrição detalhada da ação")
+    payload: Optional[Dict[str, Any]] = Field(default=None, description="Payload técnico em JSON")
     requires_human_approval: bool = Field(
-        True, 
-        description="Trava HITL: True se a ação alterar dados ou reativar serviços críticos."
-    )
-    payload: Optional[Dict[str, Any]] = Field(
-        None, 
-        description="Parâmetros técnicos para automação (ex: webhook_id, endpoint)."
+        default=True, 
+        description="Se a ação exige aprovação humana para ser executada"
     )
 
+    @model_validator(mode="after")
+    def enforce_hitl_policy(self):
+        if self.action_type in MUTATING_ACTIONS:
+            self.requires_human_approval = True
+        return self
+
 class LogAnalysisResult(BaseModel):
-    service_name: str = Field(
-        ..., 
-        description="Nome do serviço ou integração impactada (ex: MercadoLivre API, Sentry, Webhook Marketplace)."
-    )
-    summary: str = Field(
-        ..., 
-        description="Resumo do incidente em uma frase direta."
-    )
-    root_cause: str = Field(
-        ..., 
-        description="Análise detalhada da causa raiz identificada no log."
-    )
-    severity: SeverityLevel = Field(
-        ..., 
-        description="Nível de severidade do impacto no e-commerce."
-    )
-    recommended_actions: List[RecommendedAction] = Field(
-        ..., 
-        description="Lista de ações recomendadas para mitigar ou resolver o problema."
-    )
+    model_config = ConfigDict(extra="forbid")
+    
+    service_name: str = Field(description="Nome do serviço impactado (ex: Mercado Livre API, WooCommerce)")
+    severity: SeverityLevel = Field(description="Nível de severidade do incidente")
+    root_cause: str = Field(description="Explicação sucinta e técnica da causa raiz")
+    confidence_score: float = Field(description="Score de confiança do diagnóstico (0.0 a 1.0)")
     requires_human_intervention: bool = Field(
-        ..., 
-        description="Trava global: True se qualquer ação exigir validação humana antes da execução."
+        default=True, 
+        description="Indica se há ações que exigem intervenção humana"
     )
-    confidence_score: float = Field(
-        ..., 
-        ge=0.0, 
-        le=1.0, 
-        description="Nível de confiança da análise da IA (de 0.0 a 1.0)."
-    )
+    recommended_actions: List[RecommendedAction] = Field(description="Lista de ações corretivas")
+
+    @model_validator(mode="after")
+    def sync_global_intervention_flag(self):
+        self.requires_human_intervention = any(
+            action.requires_human_approval for action in self.recommended_actions
+        )
+        return self
