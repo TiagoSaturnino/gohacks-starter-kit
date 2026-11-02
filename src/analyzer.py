@@ -1,29 +1,37 @@
 ﻿import os
-import json
+from typing import Literal, Optional
 import anthropic
 from dotenv import load_dotenv
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from src.schemas import LogAnalysisResult
 from src.mocks import get_mock_analysis
 
 load_dotenv()
+
+class AnalysisOutcome(BaseModel):
+    source: Literal["LIVE", "MOCK", "DEGRADED"]
+    result: Optional[LogAnalysisResult] = None
+    error: Optional[str] = None
 
 SYSTEM_PROMPT = """
 Você é um Especialista Sênior em Triagem de Logs e RCA (Root Cause Analysis) para o ecossistema GoGroup.
 Sua missão é analisar logs brutos de erro e retornar uma estrutura rígida JSON.
 
 Regras de Segurança:
-1. Analise apenas os dados contidos no log. Não invente serviços ou IDs não presentes no texto.
+1. Analise apenas os dados contidos no log. Não invente serviços, URLs ou IDs não presentes no texto.
 2. Identifique o serviço, causa raiz, severidade e ações corretivas necessárias.
 """
 
-def analyze_log(log_text: str) -> LogAnalysisResult:
+def analyze_log(log_text: str) -> AnalysisOutcome:
     use_mock = os.getenv("USE_MOCK", "True").lower() in ("true", "1", "yes")
     api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    model_name = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+    model_name = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
 
     if use_mock or not api_key or api_key.startswith("sk-ant-sua"):
-        return get_mock_analysis(log_text)
+        return AnalysisOutcome(
+            source="MOCK",
+            result=get_mock_analysis(log_text)
+        )
 
     try:
         client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
@@ -43,13 +51,37 @@ def analyze_log(log_text: str) -> LogAnalysisResult:
             tool_choice={"type": "tool", "name": "submit_log_analysis"}
         )
 
+        if response.stop_reason == "max_tokens":
+            return AnalysisOutcome(
+                source="DEGRADED",
+                error="A resposta do modelo foi truncada por limite de tokens. Encaminhado para análise manual."
+            )
+
         for content in response.content:
             if content.type == "tool_use" and content.name == "submit_log_analysis":
-                return LogAnalysisResult.model_validate(content.input)
+                validated_result = LogAnalysisResult.model_validate(content.input)
+                return AnalysisOutcome(
+                    source="LIVE",
+                    result=validated_result
+                )
 
-        raise ValueError("O modelo não retornou a ferramenta esperada.")
+        return AnalysisOutcome(
+            source="DEGRADED",
+            error="O modelo não disparou a ferramenta de saída estruturada."
+        )
 
-    except (anthropic.APIError, ValidationError, Exception) as e:
-        fallback_result = get_mock_analysis(log_text)
-        fallback_result.root_cause += f" (Nota: Análise gerada em modo de contingência devido a erro: {str(e)[:50]})"
-        return fallback_result
+    except ValidationError as ve:
+        return AnalysisOutcome(
+            source="DEGRADED",
+            error=f"Falha na validação do Schema Pydantic: {str(ve)[:120]}"
+        )
+    except anthropic.APIError as ae:
+        return AnalysisOutcome(
+            source="DEGRADED",
+            error=f"Erro de comunicação com a API Anthropic: {ae.message}"
+        )
+    except Exception as e:
+        return AnalysisOutcome(
+            source="DEGRADED",
+            error=f"Erro inesperado no pipeline de triagem: {str(e)[:100]}"
+        )

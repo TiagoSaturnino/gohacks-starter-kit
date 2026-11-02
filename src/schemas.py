@@ -18,7 +18,8 @@ class ActionType(str, Enum):
 MUTATING_ACTIONS = {
     ActionType.REFRESH_TOKEN,
     ActionType.RETRY_WEBHOOK,
-    ActionType.CLEAR_CACHE
+    ActionType.CLEAR_CACHE,
+    ActionType.ESCALATE_HUMAN
 }
 
 class RecommendedAction(BaseModel):
@@ -41,10 +42,14 @@ class RecommendedAction(BaseModel):
 class LogAnalysisResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
     
-    service_name: str = Field(description="Nome do serviço impactado (ex: Mercado Livre API, WooCommerce)")
+    service_name: str = Field(description="Nome do serviço impactado (ex: Mercado Livre API, Amazon SP-API)")
     severity: SeverityLevel = Field(description="Nível de severidade do incidente")
     root_cause: str = Field(description="Explicação sucinta e técnica da causa raiz")
-    confidence_score: float = Field(description="Score de confiança do diagnóstico (0.0 a 1.0)")
+    confidence_score: float = Field(
+        ge=0.0, 
+        le=1.0, 
+        description="Score de confiança do diagnóstico (0.0 a 1.0)"
+    )
     requires_human_intervention: bool = Field(
         default=True, 
         description="Indica se há ações que exigem intervenção humana"
@@ -53,7 +58,13 @@ class LogAnalysisResult(BaseModel):
 
     @model_validator(mode="after")
     def sync_global_intervention_flag(self):
-        self.requires_human_intervention = any(
-            action.requires_human_approval for action in self.recommended_actions
-        )
+        # Se severidade for CRITICAL, força HITL obrigatoriamente
+        if self.severity == SeverityLevel.CRITICAL:
+            self.requires_human_intervention = True
+            for action in self.recommended_actions:
+                action.requires_human_approval = True
+        else:
+            self.requires_human_intervention = any(
+                action.requires_human_approval for action in self.recommended_actions
+            )
         return self
