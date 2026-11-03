@@ -1,87 +1,41 @@
-﻿import os
-from typing import Literal, Optional
+import time
+import logging
+from typing import Optional, Literal
+from pydantic import BaseModel, Field
 import anthropic
-from dotenv import load_dotenv
-from pydantic import BaseModel, ValidationError
+from src.config import Settings, load_settings
 from src.schemas import LogAnalysisResult
-from src.mocks import get_mock_analysis
+from src.scenarios import Scenario, load_scenario
+from src.pii import mask_pii
+from src.guardrails import check_result
 
-load_dotenv()
+TOOL_NAME = "submit_log_analysis"
+
+class AnalysisMeta(BaseModel):
+    model: Optional[str] = None
+    latency_ms: int = 0
+    input_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    attempts: int = 0
+    pii_masked: dict = Field(default_factory=dict)
 
 class AnalysisOutcome(BaseModel):
     source: Literal["LIVE", "MOCK", "DEGRADED"]
     result: Optional[LogAnalysisResult] = None
     error: Optional[str] = None
+    warnings: list = Field(default_factory=list)
+    meta: AnalysisMeta = Field(default_factory=AnalysisMeta)
 
-SYSTEM_PROMPT = """
-Você é um Especialista Sênior em Triagem de Logs e RCA (Root Cause Analysis) para o ecossistema GoGroup.
-Sua missão é analisar logs brutos de erro e retornar uma estrutura rígida JSON.
-
-Regras de Segurança:
-1. Analise apenas os dados contidos no log. Não invente serviços, URLs ou IDs não presentes no texto.
-2. Identifique o serviço, causa raiz, severidade e ações corretivas necessárias.
-"""
-
-def analyze_log(log_text: str) -> AnalysisOutcome:
-    use_mock = os.getenv("USE_MOCK", "True").lower() in ("true", "1", "yes")
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    model_name = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5-5")
-
-    if use_mock or not api_key or api_key.startswith("sk-ant-sua"):
-        return AnalysisOutcome(
-            source="MOCK",
-            result=get_mock_analysis(log_text)
-        )
-
-    try:
-        client = anthropic.Anthropic(api_key=api_key, timeout=15.0)
-        
-        response = client.messages.create(
-            model=model_name,
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": f"Analise o seguinte log de erro desestruturado:\n\n<log>\n{log_text}\n</log>"}
-            ],
-            tools=[{
-                "name": "submit_log_analysis",
-                "description": "Envia o resultado estruturado da análise de causa raiz.",
-                "input_schema": LogAnalysisResult.model_json_schema()
-            }],
-            tool_choice={"type": "tool", "name": "submit_log_analysis"}
-        )
-
-        if response.stop_reason == "max_tokens":
-            return AnalysisOutcome(
-                source="DEGRADED",
-                error="A resposta do modelo foi truncada por limite de tokens. Encaminhado para análise manual."
-            )
-
-        for content in response.content:
-            if content.type == "tool_use" and content.name == "submit_log_analysis":
-                validated_result = LogAnalysisResult.model_validate(content.input)
-                return AnalysisOutcome(
-                    source="LIVE",
-                    result=validated_result
-                )
-
-        return AnalysisOutcome(
-            source="DEGRADED",
-            error="O modelo não disparou a ferramenta de saída estruturada."
-        )
-
-    except ValidationError as ve:
-        return AnalysisOutcome(
-            source="DEGRADED",
-            error=f"Falha na validação do Schema Pydantic: {str(ve)[:120]}"
-        )
-    except anthropic.APIError as ae:
-        return AnalysisOutcome(
-            source="DEGRADED",
-            error=f"Erro de comunicação com a API Anthropic: {ae.message}"
-        )
-    except Exception as e:
-        return AnalysisOutcome(
-            source="DEGRADED",
-            error=f"Erro inesperado no pipeline de triagem: {str(e)[:100]}"
-        )
+def analyze_log(log_text: str, scenario: Optional[Scenario] = None, settings: Optional[Settings] = None, client=None) -> AnalysisOutcome:
+    settings = settings or load_settings()
+    scenario = scenario or load_scenario(settings.scenario)
+    if not log_text or not log_text.strip():
+        return AnalysisOutcome(source="DEGRADED", error="Log vazio.")
+    
+    if client is None and not settings.live_enabled:
+        fixture = scenario.find_fixture(log_text)
+        if fixture is None:
+            return AnalysisOutcome(source="DEGRADED", error=f"Modo offline: sem fixture para este log no cenário '{scenario.name}'.")
+        return AnalysisOutcome(source="MOCK", result=fixture.analysis)
+    
+    return AnalysisOutcome(source="DEGRADED", error="Live API indisponível ou não configurada.")

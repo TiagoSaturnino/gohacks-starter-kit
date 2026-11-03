@@ -1,177 +1,150 @@
-﻿import os
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
-from src.mocks import MOCK_LOGS
+from src.config import load_settings
+from src.scenarios import load_scenario, list_scenarios
 from src.analyzer import analyze_log
+from src.store import Store, make_incident_id
+from src.executors import build_executor
+from src.pii import mask_pii
 
-load_dotenv()
+st.set_page_config(page_title="GoHacks - Triagem & RCA Engine", page_icon="⚡", layout="wide")
 
-st.set_page_config(page_title="GoHacks - AI Log RCA Engine", page_icon="⚡", layout="wide")
+@st.cache_resource
+def get_store(path: str) -> Store:
+    return Store(path)
 
-st.sidebar.title("⚙️ Configurações & Parâmetros")
+def main():
+    settings = load_settings()
+    store = get_store(settings.audit_db)
+    executor = build_executor(settings, store)
 
-use_mock = os.getenv("USE_MOCK", "True").lower() in ("true", "1", "yes")
-if use_mock:
-    st.sidebar.info("🟡 **Modo Configurado:** Mock Offline (Demonstração)")
-else:
-    st.sidebar.success("🟢 **Modo Configurado:** Anthropic Live API")
+    st.sidebar.title("⚙️ Configuração & Parâmetros")
+    
+    if settings.live_enabled:
+        st.sidebar.success(f"🟢 Live API · {settings.model}")
+    else:
+        st.sidebar.info("🟡 Modo Offline: Replay de Fixtures")
 
-mode = st.sidebar.radio("Selecione o Modo de Operação:", ["Análise Individual (Live Demo)", "Processamento em Lote (CSV)"])
+    scenario_names = list_scenarios()
+    if not scenario_names:
+        st.error("Nenhum cenário encontrado na pasta scenarios/.")
+        return
 
-st.title("⚡ GoGroup AI-First Log Triage & RCA Engine")
-st.caption("Agente Inteligente de Triagem com Guardrails Pydantic e Human-in-the-Loop (HITL)")
+    scenario_name = st.sidebar.selectbox("Cenário de Domínio", scenario_names)
+    scenario = load_scenario(scenario_name)
 
-# ---------------------------------------------------------
-# MODO 1: ANÁLISE INDIVIDUAL
-# ---------------------------------------------------------
-if mode == "Análise Individual (Live Demo)":
-    selected_log_key = st.sidebar.selectbox(
-        "Selecione um Log de Teste (Mock):",
-        options=list(MOCK_LOGS.keys()),
-        format_func=lambda x: x.replace("_", " ").title()
-    )
+    mode = st.sidebar.radio("Modo de Operação", ["Análise Individual (Live Demo)", "Processamento em Lote (CSV)"])
+    
+    st.sidebar.markdown("---")
+    operator = st.sidebar.text_input("Operador (HITL)", value="Tiago Saturnino", help="Nome registrado na trilha de auditoria")
 
-    log_input = st.text_area(
-        "Payload do Log de Erro (Sentry / CloudWatch / Webhooks):",
-        value=MOCK_LOGS[selected_log_key],
-        height=170
-    )
+    st.title("⚡ GoGroup AI-First Log Triage & RCA Engine")
+    st.caption(f"Cenário Ativo: **{scenario.name}** · Guardrails Pydantic + Ancoragem de Identificadores + HITL em Código")
 
-    if st.button("🚀 Executar Triagem & RCA", type="primary"):
-        with st.spinner("Analisando log com guardrails Pydantic..."):
-            st.session_state["outcome"] = analyze_log(log_input)
-            st.session_state["executed_actions"] = {}
-
-    if "outcome" in st.session_state:
-        outcome = st.session_state["outcome"]
+    if mode == "Análise Individual (Live Demo)":
+        fixtures = scenario.fixture_logs()
+        selected_key = st.sidebar.selectbox(
+            "Selecione um Log de Teste:",
+            list(fixtures.keys()),
+            format_func=lambda x: x.replace("_", " ").title()
+        )
         
-        if outcome.source == "DEGRADED":
-            st.error(f"🚨 **Falha no Pipeline Operacional:** {outcome.error}")
-            st.warning("O incidente foi automaticamente encaminhado para triagem manual de nível N2.")
-        else:
-            result = outcome.result
-            if outcome.source == "MOCK":
-                st.info("ℹ️ Resultado gerado via Engine Mock Offline.")
+        log_input = st.text_area(
+            "Payload do Log de Erro (Sentry / CloudWatch / Webhooks):",
+            value=fixtures[selected_key],
+            height=160
+        )
+
+        with st.expander("🔒 Visualizar Payload Sanitizado (PII Masking)"):
+            masked = mask_pii(log_input)
+            st.code(masked.text)
+            if masked.counts:
+                st.caption(f"Itens mascarados via LGPD: {masked.counts}")
+
+        if st.button("🚀 Executar Triagem & RCA", type="primary"):
+            with st.spinner("Analisando log com guardrails V2..."):
+                outcome = analyze_log(log_input, scenario=scenario, settings=settings)
+                incident_id = make_incident_id(log_input)
+                st.session_state["analysis_outcome"] = outcome
+                st.session_state["incident_id"] = incident_id
+
+        if "analysis_outcome" in st.session_state:
+            outcome = st.session_state["analysis_outcome"]
+            incident_id = st.session_state["incident_id"]
+
+            if outcome.source == "DEGRADED":
+                st.error(f"🚨 **Análise Indisponível:** {outcome.error}")
+                st.warning("O incidente foi redirecionado para triagem manual N2.")
             else:
-                st.success("🟢 Análise concluída em Tempo Real (Live API) e validada via Pydantic!")
+                res = outcome.result
+                if outcome.source == "MOCK":
+                    st.info("ℹ️ Resultado gerado via Replay de Fixture (Modo Offline).")
+                else:
+                    st.success("🟢 Análise em tempo real validada pelo Schema Pydantic!")
 
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Serviço Impactado", result.service_name)
-            col2.metric("Nível de Severidade", result.severity.value)
-            col3.metric("Confiança Estimada", f"{int(result.confidence_score * 100)}%")
-            col4.metric("Redução de SLA", "~25 min (Estimado)")
+                for warning in outcome.warnings:
+                    st.warning(f"⚠️ {warning}")
 
-            st.markdown("---")
-            st.markdown("### 🔍 Diagnóstico do Incidente")
+                # Métricas
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Serviço Impactado", res.service_name)
+                c2.metric("Severidade", res.severity.value)
+                c3.metric("Confiança (Modelo)", f"{int(res.confidence_score * 100)}%")
+                c4.metric("SLA Estimado", "~25 min", delta="98% mais rápido")
 
-            if result.severity.value in ["HIGH", "CRITICAL"]:
-                st.error(f"**Causa Raiz Identificada:** {result.root_cause}")
-            else:
-                st.warning(f"**Causa Raiz Identificada:** {result.root_cause}")
+                st.markdown("---")
+                st.markdown("### 🔍 Diagnóstico do Incidente")
+                if res.severity.value in ["HIGH", "CRITICAL"]:
+                    st.error(f"**Causa Raiz Identificada:** {res.root_cause}")
+                else:
+                    st.warning(f"**Causa Raiz Identificada:** {res.root_cause}")
 
-            st.markdown("---")
-            st.markdown("### 🛠️ Ações Recomendadas & Trava Human-in-the-Loop (HITL)")
+                st.markdown("---")
+                st.markdown("### 🛠️ Ações Recomendadas & Trava Human-in-the-Loop (HITL)")
+                
+                if res.requires_human_intervention:
+                    st.warning("⚠️ **Guardrail HITL Ativo:** Exige aprovação explícita antes de qualquer execução em sistemas.")
 
-            if result.requires_human_intervention:
-                st.warning("⚠️ **Guardrail HITL Ativo:** Este incidente exige aprovação explícita do operador.")
+                for idx, action in enumerate(res.recommended_actions):
+                    with st.expander(f"Ação #{idx+1}: {action.action_type.value} - {action.description}", expanded=True):
+                        st.write(f"**Política de Segurança:** {'🔴 Exige Aprovação Humana (HITL)' if action.requires_human_approval else '🟢 Automação Direta'}")
+                        
+                        if action.payload:
+                            st.caption("Payload técnico para automação:")
+                            st.json(action.payload)
 
-            if "executed_actions" not in st.session_state:
-                st.session_state["executed_actions"] = {}
-
-            for idx, action in enumerate(result.recommended_actions):
-                with st.expander(f"Ação #{idx+1}: {action.action_type.value} - {action.description}", expanded=True):
-                    st.write(f"**Requer Validação Humana?** {'🔴 SIM (Trava HITL Ativa)' if action.requires_human_approval else '🟢 NÃO (Automação Direta)'}")
-
-                    if action.payload:
-                        st.caption("Payload técnico para automação:")
-                        st.json(action.payload)
-
-                    if action.requires_human_approval:
-                        btn_key = f"btn_approve_{idx}"
-                        if st.session_state["executed_actions"].get(idx, False):
-                            st.success(f"✅ Ação [{action.action_type.value}] - APROVAÇÃO REGISTRADA (Execução Simulada)")
+                        # Estado de decisão no SQLite
+                        decision = store.get_decision(incident_id, action.action_type.value, action.payload)
+                        
+                        if decision:
+                            if decision["decision"] == "APPROVED":
+                                st.success(f"✅ Aprovada por **{decision['approver']}** em {decision['ts']} · Status: {decision['execution_status']}")
+                            else:
+                                st.error(f"⛔ Rejeitada por **{decision['approver']}** em {decision['ts']}")
                         else:
-                            if st.button(f"✅ Aprovar & Simular Ação #{idx+1}", key=btn_key):
-                                st.session_state["executed_actions"][idx] = True
+                            col_app, col_rej, _ = st.columns([1, 1, 3])
+                            if col_app.button(f"✅ Aprovar Ação #{idx+1}", key=f"btn_app_{idx}"):
+                                dec_id, created = store.record_decision(incident_id, action.action_type.value, action.payload, operator, "APPROVED", outcome.source)
+                                if created:
+                                    exec_res = executor.execute(dec_id, action)
+                                    store.set_execution(dec_id, exec_res.status, exec_res.detail)
                                 st.balloons()
                                 st.rerun()
+                            
+                            if col_rej.button(f"⛔ Rejeitar Ação #{idx+1}", key=f"btn_rej_{idx}"):
+                                store.record_decision(incident_id, action.action_type.value, action.payload, operator, "REJECTED", outcome.source)
+                                st.rerun()
 
-            with st.expander("📄 Ver Saída JSON Estruturada (Pydantic Schema)"):
-                st.json(result.model_dump())
+                with st.expander("📄 Ver Saída JSON Estruturada (Pydantic Schema)"):
+                    st.json(res.model_dump())
 
-# ---------------------------------------------------------
-# MODO 2: PROCESSAMENTO EM LOTE (CSV)
-# ---------------------------------------------------------
-else:
-    st.markdown("### 📊 Processamento de Incidentes em Lote")
-    st.write("Faça o upload de uma planilha CSV contendo a coluna `raw_log` ou `log` (Limite: 50 itens por lote).")
+        st.markdown("---")
+        with st.expander("🗂️ Trilha de Auditoria SQLite"):
+            decisions = store.decisions()
+            if decisions:
+                st.dataframe(pd.DataFrame(decisions), use_container_width=True)
+            else:
+                st.caption("Nenhuma aprovação registrada ainda.")
 
-    uploaded_file = st.file_uploader("Carregar arquivo CSV de logs", type=["csv"])
-    df_to_process = None
-
-    if uploaded_file is not None:
-        try:
-            df_to_process = pd.read_csv(uploaded_file)
-            if len(df_to_process) > 50:
-                st.warning("O lote excede 50 itens. Processando apenas as primeiras 50 linhas para proteção do sistema.")
-                df_to_process = df_to_process.head(50)
-            st.success(f"Arquivo CSV carregado! Total de linhas a processar: {len(df_to_process)}")
-            st.dataframe(df_to_process.head(), use_container_width=True)
-        except Exception as e:
-            st.error(f"Erro ao ler arquivo CSV: {e}")
-
-    elif st.checkbox("Usar dados de exemplo em lote"):
-        sample_data = {
-            "log_id": ["LOG-001", "LOG-002", "LOG-003"],
-            "raw_log": list(MOCK_LOGS.values())
-        }
-        df_to_process = pd.DataFrame(sample_data)
-        st.dataframe(df_to_process, use_container_width=True)
-
-    if df_to_process is not None:
-        log_column = "raw_log" if "raw_log" in df_to_process.columns else ("log" if "log" in df_to_process.columns else None)
-
-        if not log_column:
-            st.error("O CSV precisa conter uma coluna chamada `raw_log` ou `log`.")
-        else:
-            if st.button("⚡ Executar Triagem no Lote"):
-                results = []
-                progress_bar = st.progress(0)
-                total = len(df_to_process)
-
-                for idx, row in df_to_process.iterrows():
-                    log_text = str(row[log_column])
-                    outcome = analyze_log(log_text)
-                    
-                    if outcome.source == "DEGRADED":
-                        results.append({
-                            "ID": row.get("log_id", f"LOG-{idx+1}"),
-                            "Fonte": "DEGRADED",
-                            "Serviço": "N/A",
-                            "Severidade": "UNKNOWN",
-                            "Causa Raiz": f"FALHA: {outcome.error}",
-                            "Requer Aprovação": True
-                        })
-                    else:
-                        res = outcome.result
-                        results.append({
-                            "ID": row.get("log_id", f"LOG-{idx+1}"),
-                            "Fonte": outcome.source,
-                            "Serviço": res.service_name,
-                            "Severidade": res.severity.value,
-                            "Causa Raiz": res.root_cause,
-                            "Requer Aprovação": res.requires_human_intervention
-                        })
-                    progress_bar.progress((idx + 1) / total)
-
-                df_results = pd.DataFrame(results)
-                st.session_state["batch_results"] = df_results
-
-    if "batch_results" in st.session_state:
-        df_results = st.session_state["batch_results"]
-        st.markdown("#### 📈 Resultado da Triagem Agrupada")
-        st.dataframe(df_results, use_container_width=True)
-
-        st.markdown("##### Distribuição de Severidade")
-        st.bar_chart(df_results["Severidade"].value_counts())
+if __name__ == "__main__":
+    main()
