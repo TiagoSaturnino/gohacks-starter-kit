@@ -1,20 +1,14 @@
 {
   "id": "ecommerce",
-  "name": "Integra\u00e7\u00f5es de e-commerce (Mercado Livre, Amazon SP-API, webhooks)",
-  "domain": "Opera\u00e7\u00e3o de integra\u00e7\u00f5es de e-commerce de um grupo de varejo: sincroniza\u00e7\u00e3o de pedidos, estoque e pre\u00e7o com marketplaces (Mercado Livre, Amazon SP-API) e webhooks de checkout.",
+  "name": "Integrações de e-commerce (Mercado Livre, Amazon SP-API, webhooks)",
+  "domain": "Operação de integrações de e-commerce de um grupo de varejo: sincronização de pedidos, estoque e preço com marketplaces (Mercado Livre, Amazon SP-API) e webhooks de checkout. Falhas de autenticação, timeouts de gateway e payloads inválidos são os incidentes mais comuns.",
   "severity_rubric": {
-    "CRITICAL": "Pedidos ou faturamento bloqueados ou dados de clientes expostos.",
-    "HIGH": "Sincroniza\u00e7\u00e3o de pedidos, estoque ou pre\u00e7o interrompida.",
-    "MEDIUM": "Falha intermitente ou degrada\u00e7\u00e3o com retentativa poss\u00edvel.",
+    "CRITICAL": "Pedidos ou faturamento bloqueados (ex.: pedido sem dados fiscais indo para a DLQ) ou dados de clientes expostos.",
+    "HIGH": "Sincronização de pedidos, estoque ou preço interrompida para um marketplace.",
+    "MEDIUM": "Falha intermitente ou degradação com retentativa possível.",
     "LOW": "Aviso sem impacto operacional imediato."
   },
-  "allowed_actions": [
-    "REFRESH_TOKEN",
-    "RETRY_WEBHOOK",
-    "CLEAR_CACHE",
-    "ESCALATE_HUMAN",
-    "LOG_ONLY"
-  ],
+  "allowed_actions": ["REFRESH_TOKEN", "RETRY_WEBHOOK", "CLEAR_CACHE", "ESCALATE_HUMAN", "LOG_ONLY"],
   "fixtures": [
     {
       "key": "mercadolivre_oauth_401",
@@ -22,16 +16,13 @@
       "analysis": {
         "service_name": "Mercado Livre API",
         "severity": "HIGH",
-        "root_cause": "O access token OAuth2 do seller 8849201 expirou (HTTP 401 invalid_token) ao atualizar o estoque do item MLB1298491.",
+        "root_cause": "O access token OAuth2 do seller 8849201 expirou (HTTP 401 invalid_token) ao atualizar o estoque do item MLB1298491; a sincronização de estoque desse seller está interrompida.",
         "confidence_score": 0.95,
         "recommended_actions": [
           {
             "action_type": "REFRESH_TOKEN",
-            "description": "Renovar o token de acesso do seller 8849201.",
-            "payload": {
-              "seller_id": "8849201",
-              "endpoint": "/oauth/token"
-            }
+            "description": "Renovar o token de acesso do seller 8849201 e repetir a atualização de estoque.",
+            "payload": {"seller_id": "8849201", "endpoint": "/oauth/token"}
           }
         ]
       }
@@ -42,16 +33,13 @@
       "analysis": {
         "service_name": "Amazon SP-API",
         "severity": "MEDIUM",
-        "root_cause": "A consulta GET /orders/v0/orders excedeu 30000ms e retornou 504 Gateway Timeout.",
+        "root_cause": "A consulta GET /orders/v0/orders excedeu 30000ms e retornou 504 Gateway Timeout; falha típica de lentidão do gateway, com retentativa possível.",
         "confidence_score": 0.9,
         "recommended_actions": [
           {
             "action_type": "RETRY_WEBHOOK",
             "description": "Reexecutar a consulta de pedidos com backoff exponencial.",
-            "payload": {
-              "service": "amazon_sp_api",
-              "retry_attempt": 1
-            }
+            "payload": {"service": "amazon_sp_api", "retry_attempt": 1}
           }
         ]
       }
@@ -62,16 +50,30 @@
       "analysis": {
         "service_name": "GoGroup Checkout",
         "severity": "CRITICAL",
-        "root_cause": "O webhook do pedido GC-88310 foi rejeitado porque customer.cpf veio nulo; evento enviado \u00e0 DLQ.",
+        "root_cause": "O webhook do pedido GC-88310 foi rejeitado porque customer.cpf veio nulo; o evento foi para a DLQ e o pedido fica sem dados fiscais.",
         "confidence_score": 0.95,
         "recommended_actions": [
           {
             "action_type": "ESCALATE_HUMAN",
-            "description": "Encaminhar o pedido GC-88310 \u00e0 equipe de cadastro para corre\u00e7\u00e3o do CPF.",
-            "payload": {
-              "order_id": "GC-88310",
-              "issue": "MISSING_CPF"
-            }
+            "description": "Encaminhar o pedido GC-88310 à equipe de cadastro para correção do CPF.",
+            "payload": {"order_id": "GC-88310", "issue": "MISSING_CPF"}
+          }
+        ]
+      }
+    },
+    {
+      "key": "quota_warning",
+      "log": "[2026-11-01T17:02:11Z] WARN [GoGroup-Integrator] MercadoLivre API quota at 80% of hourly limit (usage 4012/5000 requests/h).",
+      "analysis": {
+        "service_name": "Mercado Livre API",
+        "severity": "LOW",
+        "root_cause": "O consumo da API do Mercado Livre atingiu 4012 de 5000 requisições por hora; ainda não há falha, apenas risco de limite.",
+        "confidence_score": 0.85,
+        "recommended_actions": [
+          {
+            "action_type": "LOG_ONLY",
+            "description": "Registrar o alerta de consumo de cota para acompanhamento.",
+            "payload": {"quota_used": 4012, "quota_limit": 5000}
           }
         ]
       }
