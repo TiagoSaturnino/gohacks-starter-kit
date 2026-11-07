@@ -10,6 +10,7 @@ from src.priorizar import priorizar_demandas
 from src.rotear import rotear_e_executar
 from src.executors import AgendaSimuladaExecutor
 from src.schemas import Acao
+from src.slack import enviar_alerta_slack
 
 try:
     from src.config import DIAS_LANCADOR_RECENTE
@@ -46,7 +47,6 @@ def main():
                 df_alertas = rodar_regras(base_dados.agenda, base_dados, pol)
                 alertas_violacoes = df_alertas.to_dict(orient="records") if hasattr(df_alertas, "to_dict") else []
                 
-                # ACUMULA TODAS AS VIOLAÇÕES POR TÍTULO (sem sobrescrever)
                 mapa_violacoes = {}
                 for a in alertas_violacoes:
                     tid = str(a.get("titulo_id") or a.get("id") or "")
@@ -99,6 +99,19 @@ def main():
     retidos = [p for p in processados if p.get("acao") == "RETER_TITULO"]
     liberados = [p for p in processados if p.get("acao") == "LIBERAR_TITULO"]
     
+    # DISPARO PARA O SLACK (se não for passado --sem-slack)
+    slack_url = os.getenv("SLACK_WEBHOOK_URL", "")
+    envios_slack = 0
+    if not args.sem_slack and slack_url:
+        print(f"[SLACK] Notificando retenções críticas no canal via Webhook...")
+        # Envia os 5 primeiros títulos de maior prioridade/valor para não estourar rate-limit na demo
+        for tit in retidos[:5]:
+            if enviar_alerta_slack(slack_url, tit):
+                envios_slack += 1
+        print(f"[SLACK] {envios_slack} cards de retenção enviados com sucesso para o Slack!")
+    elif not args.sem_slack and not slack_url:
+        print("[SLACK AVISO] Argumento '--sem-slack' não fornecido, mas 'SLACK_WEBHOOK_URL' não está definida em .env")
+
     val_retido = sum(float(p.get("valor", 0) or 0) for p in retidos)
     val_liberado = sum(float(p.get("valor", 0) or 0) for p in liberados)
 
@@ -109,6 +122,7 @@ def main():
         "total_liberados": len(liberados),
         "valor_retido_brl": round(val_retido, 2),
         "valor_liberado_brl": round(val_liberado, 2),
+        "alertas_slack_enviados": envios_slack,
         "decisoes_sqlite": len(store.decisoes()),
         "outbox_sqlite": len(store.outbox()),
         "agenda_simulada_csv": agenda_sim if Path(agenda_sim).exists() else None,
@@ -123,6 +137,7 @@ def main():
     print(f" Total Processado     : {len(processados)} demandas")
     print(f" Títulos Retidos      : {len(retidos)} (R$ {val_retido:,.2f})")
     print(f" Títulos Liberados    : {len(liberados)} (R$ {val_liberado:,.2f})")
+    print(f" Alertas no Slack     : {envios_slack} enviados")
     print(f" Relatório Salvo em   : {relatorio_path}")
     print("===========================================================================\n")
 
