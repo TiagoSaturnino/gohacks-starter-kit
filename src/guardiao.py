@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import json
 import os
 from datetime import datetime
@@ -10,12 +10,10 @@ from src.priorizar import priorizar_demandas
 from src.rotear import rotear_e_executar
 from src.executors import AgendaSimuladaExecutor
 from src.schemas import Acao
-from src.slack import enviar_alerta_slack
 
-try:
-    from src.config import DIAS_LANCADOR_RECENTE
-except Exception:
-    DIAS_LANCADOR_RECENTE = 30
+from src.config import load_settings
+
+DIAS_LANCADOR_RECENTE = load_settings().dias_lancador_recente
 
 def main():
     parser = argparse.ArgumentParser(description="Guardião de Demandas - Modo CLI / Offline")
@@ -78,6 +76,9 @@ def main():
             titulo_id = item["titulo_id"]
             lote_remessa = item.get("lote_remessa", "LOTE_01")
             acao_val = item["acao"]
+            ultima = store.ultima_decisao(titulo_id, lote_remessa)
+            if ultima and ultima.get("origem") in ("slack", "cli"):
+                continue  # decisão humana (Slack ou fila CLI) prevalece sobre a regra
             
             class EnumVal:
                 def __init__(self, val): self.value = val
@@ -99,18 +100,10 @@ def main():
     retidos = [p for p in processados if p.get("acao") == "RETER_TITULO"]
     liberados = [p for p in processados if p.get("acao") == "LIBERAR_TITULO"]
     
-    # DISPARO PARA O SLACK (se não for passado --sem-slack)
-    slack_url = os.getenv("SLACK_WEBHOOK_URL", "")
+    # Slack: as decisões humanas ficam no bot (Socket Mode), que roda à parte.
     envios_slack = 0
-    if not args.sem_slack and slack_url:
-        print(f"[SLACK] Notificando retenções críticas no canal via Webhook...")
-        # Envia os 5 primeiros títulos de maior prioridade/valor para não estourar rate-limit na demo
-        for tit in retidos[:5]:
-            if enviar_alerta_slack(slack_url, tit):
-                envios_slack += 1
-        print(f"[SLACK] {envios_slack} cards de retenção enviados com sucesso para o Slack!")
-    elif not args.sem_slack and not slack_url:
-        print("[SLACK AVISO] Argumento '--sem-slack' não fornecido, mas 'SLACK_WEBHOOK_URL' não está definida em .env")
+    if not args.sem_slack:
+        print(f"[SLACK] Para mandar os retidos ao canal: python -m src.slack_bot --agora {args.agora}")
 
     val_retido = sum(float(p.get("valor", 0) or 0) for p in retidos)
     val_liberado = sum(float(p.get("valor", 0) or 0) for p in liberados)
