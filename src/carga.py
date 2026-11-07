@@ -127,23 +127,71 @@ def _inserir(raiz: Dict[str, Any], caminho: List[str], valor: Any) -> None:
             atual = atual.setdefault(seg, {})
 
 
+_REAIS = re.compile(r"R\$\s*(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)")
+
+
+def reais_na_prosa(texto: Any) -> float:
+    """'diferença de até R$ 0,10 por arredondamento é aceita' -> 0.10.
+
+    Estrita: o texto precisa ter EXATAMENTE um valor 'R$ ...'. Nenhum ou mais de um
+    levanta ValueError (melhor parar a carga do que usar uma tolerância errada).
+    """
+    achados = _REAIS.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um valor 'R$ ...' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return float(achados[0].replace(".", "").replace(",", "."))
+
+
+CHAVE_TOLERANCIA_DUPLICATA = "tolerancia_titulo_x_duplicata"
+
+
+def tolerancia_titulo_x_duplicata(pol: Dict[str, Any]) -> float:
+    """Tolerância título × duplicata (R$). Vem de tres_vias.titulo_x_duplicata.
+
+    Aceita número (politicas.json numérico) ou prosa (politicas.csv, 'até R$ 0,10').
+    Ausente ou ilegível -> ValueError.
+    """
+    tres_vias = pol.get("tres_vias") or {}
+    if isinstance(tres_vias.get(CHAVE_TOLERANCIA_DUPLICATA), (int, float)):
+        return float(tres_vias[CHAVE_TOLERANCIA_DUPLICATA])
+    bruto = tres_vias.get("titulo_x_duplicata")
+    if bruto is None:
+        raise ValueError("politicas: falta tres_vias.titulo_x_duplicata (tolerância da R2)")
+    if isinstance(bruto, (int, float)):
+        return float(bruto)
+    try:
+        return reais_na_prosa(bruto)
+    except ValueError as erro:
+        raise ValueError(f"politicas: tres_vias.titulo_x_duplicata ilegível — {erro}") from erro
+
+
+def _derivar_limiares(pol: Dict[str, Any]) -> Dict[str, Any]:
+    """Converte, uma vez e na carga, os limiares escritos em prosa. Falha alto se ilegível."""
+    if "titulo_x_duplicata" in (pol.get("tres_vias") or {}):
+        pol["tres_vias"][CHAVE_TOLERANCIA_DUPLICATA] = tolerancia_titulo_x_duplicata(pol)
+    return pol
+
+
 def politica(dados_dir: str | Path) -> Dict[str, Any]:
     """politicas.csv (secao, regra, valor) -> dict aninhado, no formato do politicas.json.
 
     Ex.: pol['alcadas']['analista_cp']['liberar_ou_agendar_ate'] == 5000.0
          pol['acionamento_humano']['pessoas'][0]['pessoa_id'] == 'PS01'
+         pol['tres_vias']['tolerancia_titulo_x_duplicata'] == 0.10  (derivado da prosa)
     Se existir politicas.json, ele é lido diretamente.
     """
     base = Path(dados_dir)
     if not (base / "politicas.csv").exists() and (base / "politicas.json").exists():
-        return json.loads((base / "politicas.json").read_text(encoding="utf-8"))
+        return _derivar_limiares(json.loads((base / "politicas.json").read_text(encoding="utf-8")))
     df = ler_tabela(base, "politicas")
     pol: Dict[str, Any] = {}
     for linha in df.itertuples(index=False):
         secao, regra = str(linha.secao).strip(), str(linha.regra).strip()
         caminho = [secao] if regra == secao else [secao, *regra.split(".")]
         _inserir(pol, caminho, _valor_politica(linha.valor))
-    return pol
+    return _derivar_limiares(pol)
 
 
 # --------------------------------------------------------------------- validação Pydantic

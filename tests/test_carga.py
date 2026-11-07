@@ -193,3 +193,46 @@ def test_cenario_a_carrega_completo():
     pol = politica(DADOS_REAIS)
     assert isinstance(pol["alcadas"]["analista_cp"]["liberar_ou_agendar_ate"], float)
     assert len(pol["acionamento_humano"]["pessoas"]) == 11
+
+
+# --------------------------------------------------------------------- limiares em prosa (item 2)
+
+from src.carga import reais_na_prosa, tolerancia_titulo_x_duplicata  # noqa: E402
+
+
+@pytest.mark.parametrize("texto, esperado", [
+    ("diferença de até R$ 0,10 por arredondamento é aceita", 0.10),
+    ("até R$ 1.234,56", 1234.56),
+    ("até R$50", 50.0),
+])
+def test_reais_na_prosa(texto, esperado):
+    assert reais_na_prosa(texto) == pytest.approx(esperado)
+
+
+@pytest.mark.parametrize("texto", ["sem valor nenhum", "R$ 0,10 ou R$ 0,20", "", None])
+def test_reais_na_prosa_falha_se_nao_houver_exatamente_um_valor(texto):
+    with pytest.raises(ValueError):
+        reais_na_prosa(texto)
+
+
+def _politica_com(tmp_path, texto):
+    (tmp_path / "politicas.csv").write_text(
+        f'secao,regra,valor\r\ntres_vias,titulo_x_duplicata,"{texto}"\r\n', encoding="utf-8")
+    return tmp_path
+
+
+def test_politica_deriva_tolerancia_da_prosa(tmp_path):
+    pol = politica(_politica_com(tmp_path, "valor da duplicata; diferença de até R$ 0,25 é aceita"))
+    assert pol["tres_vias"]["tolerancia_titulo_x_duplicata"] == pytest.approx(0.25)
+    assert tolerancia_titulo_x_duplicata(pol) == pytest.approx(0.25)
+
+
+def test_politica_falha_alto_com_tolerancia_ilegivel(tmp_path):
+    with pytest.raises(ValueError, match="titulo_x_duplicata"):
+        politica(_politica_com(tmp_path, "pequenas diferenças são aceitas"))
+
+
+def test_tolerancia_aceita_politica_json_numerica():
+    assert tolerancia_titulo_x_duplicata({"tres_vias": {"titulo_x_duplicata": 0.1}}) == 0.1
+    with pytest.raises(ValueError, match="falta"):
+        tolerancia_titulo_x_duplicata({})
