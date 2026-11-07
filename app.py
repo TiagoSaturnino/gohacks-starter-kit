@@ -1,54 +1,78 @@
-﻿import json
+"""Painel só leitura do Guardião do Lote (SPEC item 8).
+
+    streamlit run app.py
+
+Lê o que o guardião e o bot gravam: data/relatorio_executivo.json (placar da rodada) e
+data/agenda_simulada.csv (status ao vivo, inclusive decisões tomadas no Slack).
+Clique em "Atualizar" depois de uma decisão no Slack para vê-la aqui.
+"""
+import json
 from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Guardião de Pagamentos", layout="wide")
+MIN_POR_TITULO = 3  # premissa de conferência manual (mesma do pitch)
+REL = Path("data/relatorio_executivo.json")
+AGENDA = Path("data/agenda_simulada.csv")
 
-st.title("🛡️ Painel do Guardião de Pagamentos")
-st.caption("Consolidação de Auditoria Executiva & Agente Autônomo - Hackathon GoHacks")
 
-relatorio_path = Path("data/relatorio_executivo.json")
-agenda_sim_path = Path("data/agenda_simulada.csv")
+def brl(v: float) -> str:
+    inteiro, cent = f"{abs(float(v)):,.2f}".split(".")
+    return f"R$ {inteiro.replace(',', '.')},{cent}"
 
-if relatorio_path.exists():
-    try:
-        rel = json.loads(relatorio_path.read_text(encoding="utf-8"))
-        col1, col2, col3, col4 = st.columns(4)
-        
-        v_ret = rel.get("valor_retido_brl", 0)
-        v_lib = rel.get("valor_liberado_brl", 0)
 
-        col1.metric("Total Processado", f"{rel.get('total_demandas', 0)} títulos")
-        col2.metric("Títulos Retidos", f"{rel.get('total_retidos', 0)}", delta=f"R$ {v_ret:,.2f} Preservados", delta_color="inverse")
-        col3.metric("Títulos Liberados", f"{rel.get('total_liberados', 0)}", delta=f"R$ {v_lib:,.2f} Aprovados")
-        col4.metric("Modo de Execução", rel.get("modo_execucao", "OFFLINE"))
-    except Exception as e:
-        st.error(f"Erro ao ler relatório: {e}")
+st.set_page_config(page_title="Guardião do Lote", page_icon="🛡️", layout="wide")
 
-st.markdown("---")
+if not REL.exists():
+    st.title("🛡️ Guardião do Lote")
+    st.warning("Rode antes: python -m src.guardiao --agora 2026-11-02T08:00 --sem-ia --sem-slack")
+    st.stop()
 
-if agenda_sim_path.exists():
-    try:
-        df = pd.read_csv(agenda_sim_path)
-        col_status = "status_guardiao" if "status_guardiao" in df.columns else df.columns[0]
-        
-        filtro = st.radio(
-            "Filtrar visão:",
-            ["Todos os Registros", "Retidos (Bloqueados)", "Liberados (Aprovados)"],
-            horizontal=True
-        )
-        
-        if filtro == "Retidos (Bloqueados)":
-            df_exibir = df[df[col_status].astype(str).str.contains("RETER|BLOQUE|RETIDO", case=False, na=False)]
-        elif filtro == "Liberados (Aprovados)":
-            df_exibir = df[df[col_status].astype(str).str.contains("LIBERAR|APROV|LIBERADO", case=False, na=False)]
-        else:
-            df_exibir = df
+rel = json.loads(REL.read_text(encoding="utf-8"))
+agenda = pd.read_csv(AGENDA, dtype=str, keep_default_na=False) if AGENDA.exists() else pd.DataFrame()
 
-        st.subheader(f"📋 Agenda Simulada ({len(df_exibir)} de {len(df)} exibições)")
-        st.dataframe(df_exibir, use_container_width=True, height=500)
-    except Exception as e:
-        st.error(f"Erro ao carregar a agenda simulada: {e}")
+topo, botao = st.columns([5, 1])
+topo.title("🛡️ Guardião do Lote")
+topo.caption(f"Gogroup · contas a pagar · agenda de remessa às {rel.get('agora', '').replace('T', ' ')}")
+botao.write("")
+botao.button("🔄 Atualizar", use_container_width=True)
+
+retidos_agora = int((agenda.get("status_guardiao", pd.Series(dtype=str)) == "retido").sum())
+liberados = agenda[agenda.get("status_guardiao", pd.Series(dtype=str)) == "liberado"] if not agenda.empty else agenda
+total = int(rel.get("titulos_na_agenda", 0))
+horas_antes = total * MIN_POR_TITULO / 60
+horas_depois = rel.get("retidos", 0) * MIN_POR_TITULO / 60
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("R$ protegido (estimado)", brl(rel.get("rs_protegido", 0)))
+c2.metric("Custo máximo de falso positivo", brl(rel.get("custo_maximo_fp", 0)), help="Pior caso: se todos os retidos fossem legítimos.")
+c3.metric("Retidos agora", f"{retidos_agora} de {total}",
+          delta=f"{len(liberados)} liberado(s) pelo humano" if len(liberados) else None, delta_color="off")
+c4.metric("Conferência por semana", f"{horas_antes:.0f} h → {horas_depois:.1f} h".replace(".", ","),
+          help=f"Premissa: {MIN_POR_TITULO} min por título conferido à mão.")
+
+st.divider()
+esq, dir_ = st.columns([3, 2])
+with esq:
+    st.subheader("Retidos por lote")
+    lotes = pd.DataFrame(rel.get("retidos_por_lote", []))
+    if not lotes.empty:
+        lotes["rótulo"] = lotes["lote"] + " · fecha " + lotes["fechamento"]
+        st.bar_chart(lotes.set_index("rótulo")["valor"], color="#005CAC", height=300)
+with dir_:
+    st.subheader("Alertas por regra")
+    regras = pd.DataFrame(list(rel.get("contagem_por_regra", {}).items()), columns=["regra", "títulos"])
+    st.dataframe(regras, hide_index=True, use_container_width=True, height=300)
+
+st.subheader("Decisões humanas")
+if len(liberados):
+    st.dataframe(liberados[["lote_remessa", "titulo_id", "valor", "status_guardiao", "decidido_por", "decidido_em"]],
+                 hide_index=True, use_container_width=True)
 else:
-    st.warning("Arquivo 'data/agenda_simulada.csv' não encontrado.")
+    st.info("Nenhuma decisão humana ainda. Sem resposta até o fechamento, os títulos seguem retidos.")
+
+with st.expander("Ver títulos retidos e o motivo"):
+    if not agenda.empty:
+        st.dataframe(agenda[agenda["status_guardiao"] == "retido"][["lote_remessa", "titulo_id", "valor", "motivo"]],
+                     hide_index=True, use_container_width=True)
