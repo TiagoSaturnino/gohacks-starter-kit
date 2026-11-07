@@ -1,88 +1,104 @@
-"""Persistência mínima (SQLite, só biblioteca padrão): auditoria, outbox, triagem N2 e métricas.
+﻿"""Persistência (SQLite, só biblioteca padrão): alertas, acionamentos, decisões, outbox,
+fila de triagem manual e uso do IAProxy de IA.
 
-* `decisions`: trilha de auditoria (quem decidiu o quê, quando, com qual payload). Há
-  unicidade por (incidente, ação, hash do payload): a mesma ação não é decidida duas
-  vezes, mesmo com clique duplo (idempotência no banco, não só na tela).
-* `outbox`: ações aprovadas aguardando um worker externo (padrão outbox).
-* `manual_triage`: fila de triagem manual N2, alimentada quando a análise falha
-  (fail-closed). Uma linha por incidente.
-* `analyses`: métricas reais de cada análise (latência, tokens, custo, origem).
+Dois relógios, de propósito:
+* `ts_real`: hora de verdade, com offset (auditoria: quando o sistema gravou).
+* `ts_simulado`: o `agora` do cenário (lógica: a decisão veio antes do fechamento?).
+Sem essa separação, o teste ponta a ponta dependeria do dia em que roda.
 
-Horários são gravados em ISO-8601 com offset do fuso local (Brasília por padrão).
-É o primeiro degrau do desenho de produção (Postgres + fila): a interface fica, o
-backend troca.
+Idempotência:
+* `alertas`: UNIQUE(titulo_id, regra, evidencia_hash) -> rodar o guardião de novo não duplica.
+* `acionamentos`: UNIQUE(pessoa_id, lote_remessa, titulos_hash) -> a mesma mensagem não sai 2x.
+* `decisoes`: guarda o HISTÓRICO; vale a última por (titulo_id, lote_remessa). O clique
+  duplo é barrado por UNIQUE(titulo_id, lote_remessa, acao, decidido_por, ts_simulado).
+  (O kit original travava por ação: RETER e LIBERAR do mesmo título conviviam.)
 """
 import hashlib
 import json
 import sqlite3
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from src.schemas import Alerta, Decisao
 from src.timeutil import DEFAULT_TZ, iso_now
 
 SCHEMA = """
-CREATE TABLE IF NOT EXISTS decisions (
+CREATE TABLE IF NOT EXISTS alertas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    incident_id TEXT NOT NULL,
-    action_type TEXT NOT NULL,
-    payload_hash TEXT NOT NULL,
-    approver TEXT NOT NULL,
-    decision TEXT NOT NULL,
-    source TEXT NOT NULL,
+    ts_real TEXT NOT NULL,
+    ts_simulado TEXT NOT NULL,
+    titulo_id TEXT NOT NULL,
+    lote_remessa TEXT,
+    regra TEXT NOT NULL,
+    severidade TEXT NOT NULL,
+    evidencia TEXT NOT NULL,
+    evidencia_hash TEXT NOT NULL,
+    valor REAL NOT NULL,
+    UNIQUE (titulo_id, regra, evidencia_hash)
+);
+CREATE TABLE IF NOT EXISTS acionamentos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_real TEXT NOT NULL,
+    ts_simulado TEXT NOT NULL,
+    pessoa_id TEXT NOT NULL,
+    lote_remessa TEXT NOT NULL,
+    titulos_json TEXT NOT NULL,
+    titulos_hash TEXT NOT NULL,
+    canal TEXT NOT NULL,
+    mensagem TEXT NOT NULL,
+    UNIQUE (pessoa_id, lote_remessa, titulos_hash)
+);
+CREATE TABLE IF NOT EXISTS decisoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_real TEXT NOT NULL,
+    ts_simulado TEXT NOT NULL,
+    titulo_id TEXT NOT NULL,
+    lote_remessa TEXT NOT NULL,
+    acao TEXT NOT NULL,
+    decidido_por TEXT NOT NULL,
+    origem TEXT NOT NULL,
+    motivo TEXT,
     execution_status TEXT,
     execution_detail TEXT,
-    decision_seconds REAL,
-    UNIQUE (incident_id, action_type, payload_hash)
+    UNIQUE (titulo_id, lote_remessa, acao, decidido_por, ts_simulado)
 );
 CREATE TABLE IF NOT EXISTS outbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    decision_id INTEGER NOT NULL UNIQUE,
-    action_type TEXT NOT NULL,
+    ts_real TEXT NOT NULL,
+    decisao_id INTEGER NOT NULL UNIQUE,
+    acao TEXT NOT NULL,
     payload_json TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'PENDING'
 );
 CREATE TABLE IF NOT EXISTS manual_triage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    incident_id TEXT NOT NULL UNIQUE,
+    ts_real TEXT NOT NULL,
+    chave TEXT NOT NULL UNIQUE,
     reason TEXT NOT NULL,
     detail TEXT,
     status TEXT NOT NULL DEFAULT 'PENDING'
 );
-CREATE TABLE IF NOT EXISTS analyses (
+CREATE TABLE IF NOT EXISTS usos_ia (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    incident_id TEXT NOT NULL,
-    scenario TEXT,
-    source TEXT NOT NULL,
-    reason TEXT,
-    model TEXT,
+    ts_real TEXT NOT NULL,
+    chave TEXT,
+    endpoint TEXT NOT NULL,
+    origem TEXT NOT NULL,
+    motivo TEXT,
+    modelo TEXT,
     latency_ms INTEGER,
     input_tokens INTEGER,
     output_tokens INTEGER,
+    reasoning_tokens INTEGER,
     cost_usd REAL,
-    attempts INTEGER,
-    severity TEXT,
-    declared_confidence REAL,
-    effective_confidence REAL
+    attempts INTEGER
 );
 """
 
-# Colunas acrescentadas depois da primeira versão (bancos antigos são migrados).
-MIGRATIONS = {"decisions": [("decision_seconds", "REAL")]}
 
-
-def make_incident_id(log_text: str) -> str:
-    """Identificador estável do incidente (hash do log normalizado)."""
-    normalized = " ".join(log_text.split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:12]
-
-
-def payload_hash(payload: Optional[Dict[str, Any]]) -> str:
-    canonical = json.dumps(payload or {}, sort_keys=True, ensure_ascii=False)
+def short_hash(value: Any) -> str:
+    canonical = value if isinstance(value, str) else json.dumps(value, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
@@ -92,151 +108,158 @@ class Store:
         self.tz_name = tz_name
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        with closing(self._connect()) as conn:
+        self._mem: Optional[sqlite3.Connection] = None
+        if self.path == ":memory:":  # uma conexão só, senão cada chamada veria um banco vazio
+            self._mem = sqlite3.connect(":memory:", check_same_thread=False)
+            self._mem.row_factory = sqlite3.Row
+        with self._conn() as conn:
             conn.executescript(SCHEMA)
-            self._migrate(conn)
             conn.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    # ------------------------------------------------------------------ infra
+    def _conn(self):
+        if self._mem is not None:
+            return nullcontext(self._mem)
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
-        return conn
-
-    @staticmethod
-    def _migrate(conn: sqlite3.Connection) -> None:
-        for table, columns in MIGRATIONS.items():
-            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
-            for name, sql_type in columns:
-                if name not in existing:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+        return closing(conn)
 
     def _now(self) -> str:
         return iso_now(self.tz_name)
 
-    # ------------------------------------------------------------------ decisões
-    def record_decision(
-        self,
-        incident_id: str,
-        action_type: str,
-        payload: Optional[Dict[str, Any]],
-        approver: str,
-        decision: str,
-        source: str,
-        decision_seconds: Optional[float] = None,
+    def _select(self, sql: str, params: tuple = ()) -> List[Dict[str, Any]]:
+        with self._conn() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+    # ------------------------------------------------------------------ alertas
+    def record_alertas(
+        self, alertas: Iterable[Alerta], ts_simulado: str, lote_por_titulo: Optional[Dict[str, str]] = None
+    ) -> int:
+        """Grava alertas; devolve quantos eram novos (re-execução não duplica)."""
+        lote_por_titulo = lote_por_titulo or {}
+        novos = 0
+        with self._conn() as conn:
+            for a in alertas:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO alertas (ts_real, ts_simulado, titulo_id, lote_remessa, regra, "
+                    "severidade, evidencia, evidencia_hash, valor) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (self._now(), ts_simulado, a.titulo_id, lote_por_titulo.get(a.titulo_id), a.regra,
+                     a.severidade.value, a.evidencia, short_hash(a.evidencia), a.valor),
+                )
+                novos += cur.rowcount
+            conn.commit()
+        return novos
+
+    def alertas(self, limit: int = 1000) -> List[Dict[str, Any]]:
+        return self._select("SELECT * FROM alertas ORDER BY id DESC LIMIT ?", (limit,))
+
+    # ------------------------------------------------------------------ acionamentos
+    def record_acionamento(
+        self, pessoa_id: str, lote_remessa: str, titulos: List[str], canal: str, mensagem: str, ts_simulado: str
     ) -> Tuple[int, bool]:
-        """Grava a decisão. Retorna (id, criada). Se já existir, `criada` é False."""
-        digest = payload_hash(payload)
-        status = "PENDING" if decision == "APPROVED" else "NOT_EXECUTED"
-        with closing(self._connect()) as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO decisions "
-                "(ts, incident_id, action_type, payload_hash, approver, decision, source, "
-                "execution_status, decision_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (self._now(), incident_id, action_type, digest, approver, decision, source,
-                 status, decision_seconds),
+        """Uma mensagem por pessoa por lote. Retorna (id, criado)."""
+        ordenados = sorted(set(titulos))
+        digest = short_hash(ordenados)
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO acionamentos (ts_real, ts_simulado, pessoa_id, lote_remessa, "
+                "titulos_json, titulos_hash, canal, mensagem) VALUES (?,?,?,?,?,?,?,?)",
+                (self._now(), ts_simulado, pessoa_id, lote_remessa, json.dumps(ordenados), digest, canal, mensagem),
             )
-            created = cursor.rowcount == 1
+            created = cur.rowcount == 1
             row = conn.execute(
-                "SELECT id FROM decisions WHERE incident_id=? AND action_type=? AND payload_hash=?",
-                (incident_id, action_type, digest),
+                "SELECT id FROM acionamentos WHERE pessoa_id=? AND lote_remessa=? AND titulos_hash=?",
+                (pessoa_id, lote_remessa, digest),
             ).fetchone()
             conn.commit()
         return int(row["id"]), created
 
-    def get_decision(
-        self, incident_id: str, action_type: str, payload: Optional[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        with closing(self._connect()) as conn:
-            row = conn.execute(
-                "SELECT * FROM decisions WHERE incident_id=? AND action_type=? AND payload_hash=?",
-                (incident_id, action_type, payload_hash(payload)),
-            ).fetchone()
-        return dict(row) if row else None
+    def acionamentos(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._select("SELECT * FROM acionamentos ORDER BY id DESC LIMIT ?", (limit,))
 
-    def set_execution(self, decision_id: int, status: str, detail: str) -> None:
-        with closing(self._connect()) as conn:
+    # ------------------------------------------------------------------ decisões
+    def record_decisao(self, decisao: Decisao, ts_simulado: str) -> Tuple[int, bool]:
+        status = "PENDING" if decisao.acao.value in ("RETER_TITULO", "LIBERAR_TITULO") else "NOT_EXECUTED"
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO decisoes (ts_real, ts_simulado, titulo_id, lote_remessa, acao, "
+                "decidido_por, origem, motivo, execution_status) VALUES (?,?,?,?,?,?,?,?,?)",
+                (self._now(), ts_simulado, decisao.titulo_id, decisao.lote_remessa, decisao.acao.value,
+                 decisao.decidido_por, decisao.origem.value, decisao.motivo, status),
+            )
+            created = cur.rowcount == 1
+            row = conn.execute(
+                "SELECT id FROM decisoes WHERE titulo_id=? AND lote_remessa=? AND acao=? AND decidido_por=? "
+                "AND ts_simulado=?",
+                (decisao.titulo_id, decisao.lote_remessa, decisao.acao.value, decisao.decidido_por, ts_simulado),
+            ).fetchone()
+            conn.commit()
+        return int(row["id"]), created
+
+    def ultima_decisao(self, titulo_id: str, lote_remessa: str) -> Optional[Dict[str, Any]]:
+        rows = self._select(
+            "SELECT * FROM decisoes WHERE titulo_id=? AND lote_remessa=? ORDER BY ts_simulado DESC, id DESC LIMIT 1",
+            (titulo_id, lote_remessa),
+        )
+        return rows[0] if rows else None
+
+    def set_execution(self, decisao_id: int, status: str, detail: str) -> None:
+        with self._conn() as conn:
             conn.execute(
-                "UPDATE decisions SET execution_status=?, execution_detail=? WHERE id=?",
-                (status, detail, decision_id),
+                "UPDATE decisoes SET execution_status=?, execution_detail=? WHERE id=?", (status, detail, decisao_id)
             )
             conn.commit()
 
-    def decisions(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return self._select("SELECT * FROM decisions ORDER BY id DESC LIMIT ?", (limit,))
+    def decisoes(self, limit: int = 200) -> List[Dict[str, Any]]:
+        return self._select("SELECT * FROM decisoes ORDER BY id DESC LIMIT ?", (limit,))
 
     # ------------------------------------------------------------------ outbox
-    def enqueue(self, decision_id: int, action_type: str, payload: Optional[Dict[str, Any]]) -> int:
-        with closing(self._connect()) as conn:
+    def enqueue(self, decisao_id: int, acao: str, payload: Optional[Dict[str, Any]]) -> int:
+        with self._conn() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO outbox (ts, decision_id, action_type, payload_json) "
-                "VALUES (?, ?, ?, ?)",
-                (self._now(), decision_id, action_type, json.dumps(payload or {}, ensure_ascii=False)),
+                "INSERT OR IGNORE INTO outbox (ts_real, decisao_id, acao, payload_json) VALUES (?,?,?,?)",
+                (self._now(), decisao_id, acao, json.dumps(payload or {}, ensure_ascii=False)),
             )
-            row = conn.execute(
-                "SELECT id FROM outbox WHERE decision_id=?", (decision_id,)
-            ).fetchone()
+            row = conn.execute("SELECT id FROM outbox WHERE decisao_id=?", (decisao_id,)).fetchone()
             conn.commit()
         return int(row["id"])
 
-    def outbox(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def outbox(self, limit: int = 200) -> List[Dict[str, Any]]:
         return self._select("SELECT * FROM outbox ORDER BY id DESC LIMIT ?", (limit,))
 
-    # ------------------------------------------------------------------ triagem N2
-    def enqueue_manual_triage(
-        self, incident_id: str, reason: str, detail: Optional[str] = None
-    ) -> Tuple[int, bool]:
-        """Registra o incidente na fila de triagem manual N2 (idempotente por incidente)."""
-        with closing(self._connect()) as conn:
-            cursor = conn.execute(
-                "INSERT OR IGNORE INTO manual_triage (ts, incident_id, reason, detail) "
-                "VALUES (?, ?, ?, ?)",
-                (self._now(), incident_id, reason, detail),
+    # ------------------------------------------------------------------ triagem manual (plano B do Slack)
+    def enqueue_manual_triage(self, chave: str, reason: str, detail: Optional[str] = None) -> Tuple[int, bool]:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO manual_triage (ts_real, chave, reason, detail) VALUES (?,?,?,?)",
+                (self._now(), chave, reason, detail),
             )
-            created = cursor.rowcount == 1
-            row = conn.execute(
-                "SELECT id FROM manual_triage WHERE incident_id=?", (incident_id,)
-            ).fetchone()
+            created = cur.rowcount == 1
+            row = conn.execute("SELECT id FROM manual_triage WHERE chave=?", (chave,)).fetchone()
             conn.commit()
         return int(row["id"]), created
 
-    def manual_triage(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def manual_triage(self, limit: int = 200) -> List[Dict[str, Any]]:
         return self._select("SELECT * FROM manual_triage ORDER BY id DESC LIMIT ?", (limit,))
 
-    # ------------------------------------------------------------------ métricas
-    def record_analysis(self, incident_id: str, scenario: Optional[str], data: Dict[str, Any]) -> int:
-        with closing(self._connect()) as conn:
-            cursor = conn.execute(
-                "INSERT INTO analyses (ts, incident_id, scenario, source, reason, model, latency_ms, "
-                "input_tokens, output_tokens, cost_usd, attempts, severity, declared_confidence, "
-                "effective_confidence) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    self._now(), incident_id, scenario, data.get("source"), data.get("reason"),
-                    data.get("model"), data.get("latency_ms"), data.get("input_tokens"),
-                    data.get("output_tokens"), data.get("cost_usd"), data.get("attempts"),
-                    data.get("severity"), data.get("declared_confidence"),
-                    data.get("effective_confidence"),
-                ),
+    # ------------------------------------------------------------------ uso do IAProxy de IA
+    def record_uso_ia(self, chave: Optional[str], data: Dict[str, Any]) -> int:
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO usos_ia (ts_real, chave, endpoint, origem, motivo, modelo, latency_ms, input_tokens, "
+                "output_tokens, reasoning_tokens, cost_usd, attempts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (self._now(), chave, data.get("endpoint", "chat"), data.get("origem", "?"), data.get("motivo"),
+                 data.get("modelo"), data.get("latency_ms"), data.get("input_tokens"), data.get("output_tokens"),
+                 data.get("reasoning_tokens"), data.get("cost_usd"), data.get("attempts")),
             )
             conn.commit()
-            return int(cursor.lastrowid)
+            return int(cur.lastrowid)
 
-    def analyses(self, limit: int = 50) -> List[Dict[str, Any]]:
-        return self._select("SELECT * FROM analyses ORDER BY id DESC LIMIT ?", (limit,))
-
-    def analytics(self) -> Dict[str, Any]:
-        with closing(self._connect()) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) AS total, "
-                "COALESCE(SUM(source='LIVE'),0) AS live, "
-                "COALESCE(SUM(source='MOCK'),0) AS mock, "
-                "COALESCE(SUM(source='DEGRADED'),0) AS degraded, "
-                "AVG(CASE WHEN source='LIVE' THEN latency_ms END) AS avg_latency_live_ms, "
-                "COALESCE(SUM(input_tokens),0) AS input_tokens, "
-                "COALESCE(SUM(output_tokens),0) AS output_tokens, "
-                "COALESCE(SUM(cost_usd),0) AS cost_usd FROM analyses"
-            ).fetchone()
-        return dict(row)
-
-    def _select(self, sql: str, params: tuple) -> List[Dict[str, Any]]:
-        with closing(self._connect()) as conn:
-            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+    def resumo_ia(self) -> Dict[str, Any]:
+        rows = self._select(
+            "SELECT COUNT(*) AS chamadas, COALESCE(SUM(origem='LIVE'),0) AS live, "
+            "COALESCE(SUM(origem='CACHE'),0) AS cache, COALESCE(SUM(origem='MODELO'),0) AS texto_modelo, "
+            "COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens, "
+            "COALESCE(SUM(cost_usd),0) AS cost_usd FROM usos_ia"
+        )
+        return rows[0]

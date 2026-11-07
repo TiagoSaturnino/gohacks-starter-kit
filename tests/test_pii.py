@@ -49,3 +49,23 @@ def test_does_not_touch_operational_identifiers():
     out = mask_pii(text)
     assert out.text == text
     assert out.total == 0
+
+
+def test_dados_bancarios_mascarados_mas_nf_com_serie_nao():
+    from src.pii import mask_pii
+
+    texto = ("destino ted 905/0001/4471203-9 conta 4471203-9 NF 73535-1 "
+             "linha 28995217401010503090100001158617316080003002303 "
+             "pix 244c83bc-a736-4fff-afa2-6e12fdcf5242 TP431502 valor 90873.80 em 2026-10-30")
+    out = mask_pii(texto)
+    for segredo in ("4471203-9", "289952174", "244c83bc"):
+        assert segredo not in out.text
+    for preservado in ("NF 73535-1", "TP431502", "90873.80", "2026-10-30"):
+        assert preservado in out.text
+
+
+def test_mascaras_parciais_para_slack():
+    from src.pii import mascarar_cnpj, mascarar_conta
+
+    assert mascarar_conta("4471203-9") == "****203-9"
+    assert mascarar_cnpj("85.779.751/0001-00") == "85.779.***/0001-**"
