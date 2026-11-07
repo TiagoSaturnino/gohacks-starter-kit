@@ -127,23 +127,144 @@ def _inserir(raiz: Dict[str, Any], caminho: List[str], valor: Any) -> None:
             atual = atual.setdefault(seg, {})
 
 
+_REAIS = re.compile(r"R\$\s*(\d{1,3}(?:\.\d{3})+(?:,\d+)?|\d+(?:,\d+)?)")
+
+
+def reais_na_prosa(texto: Any) -> float:
+    """'diferença de até R$ 0,10 por arredondamento é aceita' -> 0.10.
+
+    Estrita: o texto precisa ter EXATAMENTE um valor 'R$ ...'. Nenhum ou mais de um
+    levanta ValueError (melhor parar a carga do que usar uma tolerância errada).
+    """
+    achados = _REAIS.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um valor 'R$ ...' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return float(achados[0].replace(".", "").replace(",", "."))
+
+
+CHAVE_TOLERANCIA_DUPLICATA = "tolerancia_titulo_x_duplicata"
+
+
+def tolerancia_titulo_x_duplicata(pol: Dict[str, Any]) -> float:
+    """Tolerância título × duplicata (R$). Vem de tres_vias.titulo_x_duplicata.
+
+    Aceita número (politicas.json numérico) ou prosa (politicas.csv, 'até R$ 0,10').
+    Ausente ou ilegível -> ValueError.
+    """
+    tres_vias = pol.get("tres_vias") or {}
+    if isinstance(tres_vias.get(CHAVE_TOLERANCIA_DUPLICATA), (int, float)):
+        return float(tres_vias[CHAVE_TOLERANCIA_DUPLICATA])
+    bruto = tres_vias.get("titulo_x_duplicata")
+    if bruto is None:
+        raise ValueError("politicas: falta tres_vias.titulo_x_duplicata (tolerância da R2)")
+    if isinstance(bruto, (int, float)):
+        return float(bruto)
+    try:
+        return reais_na_prosa(bruto)
+    except ValueError as erro:
+        raise ValueError(f"politicas: tres_vias.titulo_x_duplicata ilegível — {erro}") from erro
+
+
+_PERCENTUAL = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def percentual_na_prosa(texto: Any) -> float:
+    """'pode passar ... em até 2% ou R$ 50,00' -> 0.02. Estrita: exatamente um 'N%'."""
+    achados = _PERCENTUAL.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um percentual 'N%' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return float(achados[0].replace(",", ".")) / 100
+
+
+CHAVE_TOLERANCIA_NF_OC = "tolerancia_nf_x_oc"
+
+
+def tolerancia_nf_x_oc(pol: Dict[str, Any]) -> Dict[str, float]:
+    """Tolerância NF × OC (R4): {'percentual': 0.02, 'reais': 50.0}; vale o maior dos dois.
+
+    Vem de tres_vias.nf_x_oc ('até 2% ou R$ 50,00 (o que for maior)'), ou de um dict
+    numérico já pronto (politicas.json). Ausente ou ilegível -> ValueError.
+    """
+    tres_vias = pol.get("tres_vias") or {}
+    pronto = tres_vias.get(CHAVE_TOLERANCIA_NF_OC)
+    if isinstance(pronto, dict) and {"percentual", "reais"} <= set(pronto):
+        return {"percentual": float(pronto["percentual"]), "reais": float(pronto["reais"])}
+    bruto = tres_vias.get("nf_x_oc")
+    if bruto is None:
+        raise ValueError("politicas: falta tres_vias.nf_x_oc (tolerância da R4)")
+    try:
+        return {"percentual": percentual_na_prosa(bruto), "reais": reais_na_prosa(bruto)}
+    except ValueError as erro:
+        raise ValueError(f"politicas: tres_vias.nf_x_oc ilegível — {erro}") from erro
+
+
+_DIAS = re.compile(r"(\d+)\s*dias\b")
+
+
+def dias_na_prosa(texto: Any) -> int:
+    """'nem para um telefone trocado há menos de 30 dias' -> 30. Estrita: exatamente um 'N dias'."""
+    achados = _DIAS.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um prazo 'N dias' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return int(achados[0])
+
+
+CHAVE_DIAS_TELEFONE = "dias_telefone_recente"
+
+
+def dias_telefone_recente(pol: Dict[str, Any]) -> int:
+    """Telefone trocado há menos de N dias não serve para confirmar troca de conta (R5).
+
+    Vem de dados_bancarios.troca_de_conta (prosa) ou de um número já pronto.
+    Ausente ou ilegível -> ValueError.
+    """
+    dados = pol.get("dados_bancarios") or {}
+    if isinstance(dados.get(CHAVE_DIAS_TELEFONE), (int, float)):
+        return int(dados[CHAVE_DIAS_TELEFONE])
+    bruto = dados.get("troca_de_conta")
+    if bruto is None:
+        raise ValueError("politicas: falta dados_bancarios.troca_de_conta (prazo do telefone na R5)")
+    try:
+        return dias_na_prosa(bruto)
+    except ValueError as erro:
+        raise ValueError(f"politicas: dados_bancarios.troca_de_conta ilegível — {erro}") from erro
+
+
+def _derivar_limiares(pol: Dict[str, Any]) -> Dict[str, Any]:
+    """Converte, uma vez e na carga, os limiares escritos em prosa. Falha alto se ilegível."""
+    if "titulo_x_duplicata" in (pol.get("tres_vias") or {}):
+        pol["tres_vias"][CHAVE_TOLERANCIA_DUPLICATA] = tolerancia_titulo_x_duplicata(pol)
+    if "nf_x_oc" in (pol.get("tres_vias") or {}):
+        pol["tres_vias"][CHAVE_TOLERANCIA_NF_OC] = tolerancia_nf_x_oc(pol)
+    if "troca_de_conta" in (pol.get("dados_bancarios") or {}):
+        pol["dados_bancarios"][CHAVE_DIAS_TELEFONE] = dias_telefone_recente(pol)
+    return pol
+
+
 def politica(dados_dir: str | Path) -> Dict[str, Any]:
     """politicas.csv (secao, regra, valor) -> dict aninhado, no formato do politicas.json.
 
     Ex.: pol['alcadas']['analista_cp']['liberar_ou_agendar_ate'] == 5000.0
          pol['acionamento_humano']['pessoas'][0]['pessoa_id'] == 'PS01'
+         pol['tres_vias']['tolerancia_titulo_x_duplicata'] == 0.10  (derivado da prosa)
     Se existir politicas.json, ele é lido diretamente.
     """
     base = Path(dados_dir)
     if not (base / "politicas.csv").exists() and (base / "politicas.json").exists():
-        return json.loads((base / "politicas.json").read_text(encoding="utf-8"))
+        return _derivar_limiares(json.loads((base / "politicas.json").read_text(encoding="utf-8")))
     df = ler_tabela(base, "politicas")
     pol: Dict[str, Any] = {}
     for linha in df.itertuples(index=False):
         secao, regra = str(linha.secao).strip(), str(linha.regra).strip()
         caminho = [secao] if regra == secao else [secao, *regra.split(".")]
         _inserir(pol, caminho, _valor_politica(linha.valor))
-    return pol
+    return _derivar_limiares(pol)
 
 
 # --------------------------------------------------------------------- validação Pydantic

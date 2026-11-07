@@ -1,22 +1,6 @@
-﻿"""Explicador de alertas (substitui o analyzer.py do kit).
-
-Diferença de semântica em relação ao kit, de propósito:
-* no kit, IA falhando -> DEGRADED -> automação bloqueada -> fila N2;
-* aqui, a decisão já foi tomada pelas regras (checks.py). IA falhando só troca a
-  explicação pelo cache ou pelo texto-modelo. NENHUMA retenção muda.
-  A fila de triagem manual passa a ser o plano B do Slack, não da IA.
-
-Ordem de tentativa para cada alerta:
-  1. cache em disco (hash do alerta + IDs das comunicações) -> origem CACHE
-  2. IAProxy (chat_json + guardrails de ancoragem)        -> origem LIVE (grava no cache)
-  3. texto-modelo determinístico                            -> origem MODELO
-
-`sinal_troca_conta` usa o Jev para classificar comunicações (A2: só agrava).
-"""
-import logging
+﻿import logging
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
-
 from pydantic import BaseModel
 
 from src.gateway import IAProxy, UsoIA
@@ -46,12 +30,10 @@ SYSTEM_PROMPT = (
     "5. Dados bancários e documentos aparecem mascarados; não tente recuperá-los."
 )
 
-
 class ResultadoExplicacao(BaseModel):
     origem: Literal["LIVE", "CACHE", "MODELO"]
     explicacao: ExplicacaoAlerta
-    motivo: Optional[str] = None  # por que não foi LIVE (IA_DESLIGADA, CIRCUIT_OPEN, ...)
-
+    motivo: Optional[str] = None
 
 def texto_modelo(alerta: Alerta) -> ExplicacaoAlerta:
     """Plano B determinístico: sempre funciona, sem rede e sem crédito."""
@@ -59,7 +41,6 @@ def texto_modelo(alerta: Alerta) -> ExplicacaoAlerta:
     if len(resumo) > 300:
         resumo = resumo[:297] + "..."
     return ExplicacaoAlerta(titulo_id=alerta.titulo_id, resumo=resumo, comunicacoes_citadas=[], agravar=False)
-
 
 def _formatar_comunicacoes(comunicacoes: List[Dict[str, Any]]) -> str:
     partes = []
@@ -72,14 +53,12 @@ def _formatar_comunicacoes(comunicacoes: List[Dict[str, Any]]) -> str:
         )
     return "\n---\n".join(partes) if partes else "(nenhuma comunicação deste fornecedor)"
 
-
 class Explicador:
     def __init__(self, IAProxy: IAProxy, cache_dir: str, store: Optional[Store] = None):
         self.IAProxy = IAProxy
         self.cache_dir = Path(cache_dir)
         self.store = store
 
-    # ------------------------------------------------------------------ cache
     def _chave(self, alerta: Alerta, comunicacoes: List[Dict[str, Any]]) -> str:
         ids = sorted(str(c.get("comunicacao_id")) for c in comunicacoes[:MAX_COMUNICACOES])
         return short_hash({"alerta": alerta.model_dump(mode="json"), "comunicacoes": ids})
@@ -90,7 +69,7 @@ class Explicador:
             return None
         try:
             return ExplicacaoAlerta.model_validate_json(path.read_text(encoding="utf-8"))
-        except Exception:  # noqa: BLE001 - cache corrompido não pode derrubar nada
+        except Exception:
             logger.warning("cache inválido ignorado: %s", path.name)
             return None
 
@@ -110,10 +89,9 @@ class Explicador:
             dados = (uso or UsoIA()).model_dump()
             dados.update({"origem": origem, "motivo": motivo})
             self.store.record_uso_ia(chave, dados)
-        except Exception:  # noqa: BLE001 - auditoria de uso é best-effort
+        except Exception:
             logger.exception("falha ao registrar uso de IA")
 
-    # ------------------------------------------------------------------ explicação
     def explicar(self, alerta: Alerta, comunicacoes: Optional[List[Dict[str, Any]]] = None) -> ResultadoExplicacao:
         comunicacoes = comunicacoes or []
         chave = self._chave(alerta, comunicacoes)
@@ -130,7 +108,7 @@ class Explicador:
         ).text
 
         def validar(obj: BaseModel) -> List[str]:
-            return check_explicacao(obj, alerta, mascarado).violations  # type: ignore[arg-type]
+            return check_explicacao(obj, alerta, mascarado).violations
 
         resultado = self.IAProxy.chat_json(SYSTEM_PROMPT, mascarado, ExplicacaoAlerta, validar=validar)
         if resultado.ok and resultado.data:
@@ -142,12 +120,7 @@ class Explicador:
         self._registrar(chave, "MODELO", resultado.uso, resultado.reason)
         return ResultadoExplicacao(origem="MODELO", explicacao=texto_modelo(alerta), motivo=resultado.reason)
 
-    # ------------------------------------------------------------------ A2 via Jev
     def sinal_troca_conta(self, comunicacao: Dict[str, Any]) -> Optional[float]:
-        """Probabilidade (0-1) de a comunicação pedir troca de dados bancários; None sem IA.
-
-        Só serve para AGRAVAR um alerta existente; nunca cria retenção.
-        """
         texto = mask_pii(
             f"assunto: {comunicacao.get('assunto')}\n{str(comunicacao.get('texto') or '')[:1500]}\n"
             f"anexos: {str(comunicacao.get('anexos') or '')[:800]}"
@@ -169,4 +142,3 @@ class Explicador:
             return float(resultado.data["troca_conta"]["noul"])
         except (KeyError, TypeError, ValueError):
             return None
-
