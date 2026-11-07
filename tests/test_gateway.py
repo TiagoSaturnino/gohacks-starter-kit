@@ -3,7 +3,7 @@ import httpx
 import pytest
 from pydantic import BaseModel
 
-from src.ia_proxy import IAProxy, extrair_json, validar_modelo
+from src.gateway import IAProxy, extrair_json, validar_modelo
 from tests.conftest import FakeHttp, FakeOpenAI
 
 

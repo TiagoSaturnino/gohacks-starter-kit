@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
 
-from src.ia_proxy import IAProxy, UsoIA
+from src.gateway import IAProxy, UsoIA
 from src.guardrails import check_explicacao
 from src.pii import mask_pii
 from src.schemas import Alerta, ExplicacaoAlerta

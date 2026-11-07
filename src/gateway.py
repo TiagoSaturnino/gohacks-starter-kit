@@ -14,7 +14,7 @@ Garantias herdadas do kit e mantidas aqui:
   O Jev informa `estimated_cost_usd`, e esse valor é registrado.
 * o token nunca aparece em log, print ou mensagem de erro.
 
-Uso rápido (PowerShell):  python -m src.ia_proxy --ping
+Uso rápido (PowerShell):  python -m src.gateway --ping
 """
 import argparse
 import json

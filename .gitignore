@@ -9,3 +9,6 @@ data/
 
 # dados do desafio (nao versionar)
 pagamentos/
+
+.env*
+!.env.example

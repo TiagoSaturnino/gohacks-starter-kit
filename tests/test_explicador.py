@@ -1,5 +1,5 @@
 ﻿from src.explicador import Explicador, texto_modelo
-from src.ia_proxy import IAProxy
+from src.gateway import IAProxy
 from src.schemas import Alerta, Severidade
 from tests.conftest import FakeHttp, FakeOpenAI
 
