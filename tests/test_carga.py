@@ -236,3 +236,31 @@ def test_tolerancia_aceita_politica_json_numerica():
     assert tolerancia_titulo_x_duplicata({"tres_vias": {"titulo_x_duplicata": 0.1}}) == 0.1
     with pytest.raises(ValueError, match="falta"):
         tolerancia_titulo_x_duplicata({})
+
+
+# --------------------------------------------------------------------- limiares em prosa (item 3)
+
+from src.carga import dias_telefone_recente, tolerancia_nf_x_oc  # noqa: E402
+
+
+def test_tolerancia_nf_x_oc_extrai_percentual_e_reais():
+    texto = "a NF pode passar do valor da OC em até 2% ou R$ 50,00 (o que for maior)"
+    assert tolerancia_nf_x_oc({"tres_vias": {"nf_x_oc": texto}}) == {"percentual": 0.02, "reais": 50.0}
+    with pytest.raises(ValueError, match="nf_x_oc"):
+        tolerancia_nf_x_oc({"tres_vias": {"nf_x_oc": "até 2% ou 3% ou R$ 50"}})
+    with pytest.raises(ValueError, match="falta"):
+        tolerancia_nf_x_oc({})
+
+
+def test_dias_telefone_recente_extrai_da_prosa_e_falha_alto():
+    texto = "nunca para um número informado na própria mensagem, nem para um telefone trocado há menos de 30 dias"
+    assert dias_telefone_recente({"dados_bancarios": {"troca_de_conta": texto}}) == 30
+    with pytest.raises(ValueError, match="troca_de_conta"):
+        dias_telefone_recente({"dados_bancarios": {"troca_de_conta": "telefone recente não vale"}})
+
+
+@pytest.mark.skipif(not DADOS_REAIS.exists(), reason="dados do desafio fora do git")
+def test_politica_real_deriva_limiares_do_item_3():
+    pol = politica(DADOS_REAIS)
+    assert pol["tres_vias"]["tolerancia_nf_x_oc"] == {"percentual": 0.02, "reais": 50.0}
+    assert pol["dados_bancarios"]["dias_telefone_recente"] == 30

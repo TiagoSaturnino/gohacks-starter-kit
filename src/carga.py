@@ -167,10 +167,83 @@ def tolerancia_titulo_x_duplicata(pol: Dict[str, Any]) -> float:
         raise ValueError(f"politicas: tres_vias.titulo_x_duplicata ilegível — {erro}") from erro
 
 
+_PERCENTUAL = re.compile(r"(\d+(?:[.,]\d+)?)\s*%")
+
+
+def percentual_na_prosa(texto: Any) -> float:
+    """'pode passar ... em até 2% ou R$ 50,00' -> 0.02. Estrita: exatamente um 'N%'."""
+    achados = _PERCENTUAL.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um percentual 'N%' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return float(achados[0].replace(",", ".")) / 100
+
+
+CHAVE_TOLERANCIA_NF_OC = "tolerancia_nf_x_oc"
+
+
+def tolerancia_nf_x_oc(pol: Dict[str, Any]) -> Dict[str, float]:
+    """Tolerância NF × OC (R4): {'percentual': 0.02, 'reais': 50.0}; vale o maior dos dois.
+
+    Vem de tres_vias.nf_x_oc ('até 2% ou R$ 50,00 (o que for maior)'), ou de um dict
+    numérico já pronto (politicas.json). Ausente ou ilegível -> ValueError.
+    """
+    tres_vias = pol.get("tres_vias") or {}
+    pronto = tres_vias.get(CHAVE_TOLERANCIA_NF_OC)
+    if isinstance(pronto, dict) and {"percentual", "reais"} <= set(pronto):
+        return {"percentual": float(pronto["percentual"]), "reais": float(pronto["reais"])}
+    bruto = tres_vias.get("nf_x_oc")
+    if bruto is None:
+        raise ValueError("politicas: falta tres_vias.nf_x_oc (tolerância da R4)")
+    try:
+        return {"percentual": percentual_na_prosa(bruto), "reais": reais_na_prosa(bruto)}
+    except ValueError as erro:
+        raise ValueError(f"politicas: tres_vias.nf_x_oc ilegível — {erro}") from erro
+
+
+_DIAS = re.compile(r"(\d+)\s*dias\b")
+
+
+def dias_na_prosa(texto: Any) -> int:
+    """'nem para um telefone trocado há menos de 30 dias' -> 30. Estrita: exatamente um 'N dias'."""
+    achados = _DIAS.findall("" if _vazio(texto) else str(texto))
+    if len(achados) != 1:
+        raise ValueError(
+            f"esperava exatamente um prazo 'N dias' no texto, achei {len(achados)}: {texto!r}"
+        )
+    return int(achados[0])
+
+
+CHAVE_DIAS_TELEFONE = "dias_telefone_recente"
+
+
+def dias_telefone_recente(pol: Dict[str, Any]) -> int:
+    """Telefone trocado há menos de N dias não serve para confirmar troca de conta (R5).
+
+    Vem de dados_bancarios.troca_de_conta (prosa) ou de um número já pronto.
+    Ausente ou ilegível -> ValueError.
+    """
+    dados = pol.get("dados_bancarios") or {}
+    if isinstance(dados.get(CHAVE_DIAS_TELEFONE), (int, float)):
+        return int(dados[CHAVE_DIAS_TELEFONE])
+    bruto = dados.get("troca_de_conta")
+    if bruto is None:
+        raise ValueError("politicas: falta dados_bancarios.troca_de_conta (prazo do telefone na R5)")
+    try:
+        return dias_na_prosa(bruto)
+    except ValueError as erro:
+        raise ValueError(f"politicas: dados_bancarios.troca_de_conta ilegível — {erro}") from erro
+
+
 def _derivar_limiares(pol: Dict[str, Any]) -> Dict[str, Any]:
     """Converte, uma vez e na carga, os limiares escritos em prosa. Falha alto se ilegível."""
     if "titulo_x_duplicata" in (pol.get("tres_vias") or {}):
         pol["tres_vias"][CHAVE_TOLERANCIA_DUPLICATA] = tolerancia_titulo_x_duplicata(pol)
+    if "nf_x_oc" in (pol.get("tres_vias") or {}):
+        pol["tres_vias"][CHAVE_TOLERANCIA_NF_OC] = tolerancia_nf_x_oc(pol)
+    if "troca_de_conta" in (pol.get("dados_bancarios") or {}):
+        pol["dados_bancarios"][CHAVE_DIAS_TELEFONE] = dias_telefone_recente(pol)
     return pol
 
 
