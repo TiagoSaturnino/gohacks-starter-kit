@@ -112,3 +112,28 @@ as tabelas do item 3.
 **Pendente para o item 4:** o guardião deve injetar `pol['guardiao']['dias_lancador_recente']` a
 partir de `config.dias_lancador_recente` antes de `rodar_regras()`. O priorizador deve garantir que
 A1 (AGRAVA) nunca gere alerta sozinha nem retenção.
+
+## Itens 4 (refeito), 5, 6 e 7 — guardião completo, IA, Slack, relatório e e2e (2026-11-07)
+
+**Gerado pela IA (Claude, chat):** `src/guardiao.py` (reescrito), `src/priorizar.py`, `src/rotear.py`,
+`src/relatorio.py`, `src/slack_bot.py`, `tests/test_e2e.py`, `tests/test_rotear.py`,
+`tests/test_slack_bot.py`.
+
+**Decidido pelo humano:** Slack em Socket Mode (botões funcionam, decisão vai para a agenda);
+fail-safe: BLOQUEIA fica retido desde o início e só sai com "Liberar" humano.
+
+**Verificado:**
+- `pytest`: 144 passed. `test_e2e.py` planta a fraude R5 da SPEC §11 (fornecedor e lote escolhidos
+  por código) e prova: ted retidos por R5 citando a troca de telefone, retidos = limpo ∪ plantados,
+  alerta + acionamento + decisão "sem decisão humana" no SQLite, agrupamento por pessoa × lote.
+- Rodar duas vezes não duplica auditoria (218 alertas, 40 acionamentos, 52 decisões).
+- Cenário A: 52 retidos em 9 lotes (R$ 642.811,33 de face); **R$ protegido R$ 625.095,75**
+  (R2 só pela diferença); custo máximo de FP R$ 68.556,12; 40 acionamentos (teto R$ 2.400).
+- Com IA: explicação dos 3 retidos mais urgentes via gateway (cache → IA → texto-modelo); sem
+  chave cai no texto-modelo sem quebrar. O conjunto de retidos não muda com ou sem IA.
+- `grep` da SPEC §10 vazio; só `gateway.py` importa `openai`/`httpx`.
+
+**Interpretações:** roteamento por categoria com a tabela da SPEC §5 (constante de domínio em
+`rotear.py`); fraude = R5/R6 → coordenadora (1ª pessoa da política) + PS08; diretoria pelo limiar de
+`alcadas.diretora_financeira`. Placar: acionamento desnecessário aproximado como um por título
+liberado pelo humano. A2 (Jev nas comunicações) não foi ligado ao CLI.

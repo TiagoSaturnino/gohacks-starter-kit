@@ -1,41 +1,51 @@
-﻿import uuid
-from typing import List, Dict, Any
+"""Quem é acionado por título (SPEC §5, passo 5), a partir de politicas.csv.
 
-def rotear_e_executar(demandas: List[Dict[str, Any]], store: Any, ts_simulado: str) -> List[Dict[str, Any]]:
-    processados = []
+- Fraude (R5 conta alterada, R6 boleto divergente): coordenadora de CP (primeira pessoa da
+  política) + PS08, como na SPEC.
+- Acima da alçada do aprovador: a pessoa de alcadas.diretora_financeira.
+- Sempre: o dono da categoria do fornecedor (tabela da SPEC §5).
+Agrupamento: UMA mensagem por pessoa por lote (`agrupar`).
+"""
+from __future__ import annotations
 
-    for d in demandas:
-        try:
-            tid = str(d.get("titulo_id") or d.get("id") or "")
-            violacoes = d.get("violacoes", [])
+from typing import Any, Dict, Iterable, List, Set, Tuple
 
-            bloqueios = [v for v in violacoes if str(v.get("severidade")).upper() == "BLOQUEIA"]
-            acionamentos = [v for v in violacoes if str(v.get("severidade")).upper() == "ACIONA"]
+# Dono por categoria (SPEC §5). Valores de domínio, não IDs de fornecedor/título.
+DONO_POR_CATEGORIA = {
+    "produto": "PS04", "embalagens": "PS04",
+    "insumos_capa": "PS05", "servicos": "PS05",
+    "marketing_agencia": "PS06", "influenciador": "PS06",
+    "frete": "PS07",
+    "aluguel": "PS10", "utilidades": "PS10",
+    "ti_saas": "PS11",
+}
+PREFIXOS_FRAUDE = ("R5", "R6")
+ANALISTA_FRAUDE = "PS08"
 
-            if bloqueios:
-                acao = "RETER_TITULO"
-                regras_str = ", ".join(set(str(b.get("regra")) for b in bloqueios))
-                motivo = f"Retido por violacao(oes) critica(s): {regras_str}"
-            elif acionamentos:
-                acao = "LIBERAR_TITULO"
-                regras_str = ", ".join(set(str(a.get("regra")) for a in acionamentos))
-                motivo = f"Liberado com alerta(s) de notificacao: {regras_str}"
-            else:
-                acao = "LIBERAR_TITULO"
-                motivo = "Liberado: Nenhuma violacao impeditiva identificada."
 
-            item = dict(d)
-            item["decisao_id"] = str(uuid.uuid4())
-            item["acao"] = acao
-            item["motivo"] = motivo
-            processados.append(item)
+def _pessoas_validas(pol: Dict[str, Any]) -> List[str]:
+    pessoas = (pol.get("acionamento_humano") or {}).get("pessoas") or []
+    return [str(p.get("pessoa_id")) for p in pessoas if p.get("pessoa_id")]
 
-        except Exception as e:
-            # FAIL-CLOSED: Em caso de falha de sistema/regra, o padrão de segurança é RETER
-            item = dict(d)
-            item["decisao_id"] = str(uuid.uuid4())
-            item["acao"] = "RETER_TITULO"
-            item["motivo"] = f"ERRO_PROCESSAMENTO_REGRA: Falha inesperada ao rotear ({e})"
-            processados.append(item)
 
-    return processados
+def pessoas_para(regras: Iterable[str], categoria: str, valor: float, pol: Dict[str, Any]) -> Set[str]:
+    validas = _pessoas_validas(pol)
+    coordenadora = validas[0] if validas else "PS01"
+    diretoria = (pol.get("alcadas") or {}).get("diretora_financeira") or {}
+    limiar = float(diretoria.get("aprova_acima_de", float("inf")))
+    alvo: Set[str] = set()
+    if any(str(r).startswith(PREFIXOS_FRAUDE) for r in regras):
+        alvo |= {coordenadora, ANALISTA_FRAUDE}
+    if valor > limiar and diretoria.get("pessoa_id"):
+        alvo.add(str(diretoria["pessoa_id"]))
+    alvo.add(DONO_POR_CATEGORIA.get(str(categoria), coordenadora))
+    return {p for p in alvo if not validas or p in validas} or {coordenadora}
+
+
+def agrupar(itens: Iterable[Tuple[str, str, Set[str]]]) -> Dict[Tuple[str, str], List[str]]:
+    """[(titulo_id, lote, pessoas)] -> {(pessoa, lote): [titulos]} — uma mensagem por par."""
+    grupos: Dict[Tuple[str, str], List[str]] = {}
+    for tid, lote, pessoas in itens:
+        for p in sorted(pessoas):
+            grupos.setdefault((p, lote), []).append(tid)
+    return {k: sorted(set(v)) for k, v in sorted(grupos.items())}
