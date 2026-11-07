@@ -1,24 +1,43 @@
 ﻿from datetime import datetime
 from typing import List, Dict, Any
 
-def priorizar_demandas(demandas: List[Dict[str, Any]], data_referencia: datetime = None) -> List[Dict[str, Any]]:
-    pesos_severidade = {
-        "CRITICO": 1,
-        "ALTO": 2,
-        "MEDIO": 3,
-        "BAIXO": 4
-    }
+PESOS_SEVERIDADE = {
+    "BLOQUEIA": 100,
+    "ACIONA": 40,
+    "AGRAVA": 10,
+}
 
-    def chave_ordenacao(item: Dict[str, Any]):
-        sev = str(item.get("severidade", "BAIXO")).upper()
-        peso_sev = pesos_severidade.get(sev, 5)
+def priorizar_demandas(demandas: List[Dict[str, Any]], agora: datetime) -> List[Dict[str, Any]]:
+    def calcular_score(d: Dict[str, Any]) -> float:
+        violacoes = d.get("violacoes", [])
+        
+        # Maior severidade entre as violações do título
+        max_peso = 0
+        for v in violacoes:
+            sev = str(v.get("severidade", "")).upper()
+            max_peso = max(max_peso, PESOS_SEVERIDADE.get(sev, 0))
+        
+        # Urgência por horário de fechamento
+        horario_str = d.get("horario_fechamento")
+        score_urgencia = 0.0
+        if horario_str:
+            try:
+                # Exemplo de parsing simples ou fallback de minutos
+                h, m = map(int, horario_str.split(":")[:2])
+                ref_min = agora.hour * 60 + agora.minute
+                alvo_min = h * 60 + m
+                diff = alvo_min - ref_min
+                if diff > 0:
+                    score_urgencia = max(0.0, 120.0 - diff) # Mais urgente quanto menor a diferença
+            except Exception:
+                score_urgencia = 0.0
 
-        valor = item.get("valor", 0.0)
-        try:
-            valor = float(valor)
-        except (ValueError, TypeError):
-            valor = 0.0
+        valor = float(d.get("valor", 0) or 0)
+        score_valor = min(valor / 10000.0, 50.0) # Cap para valor financeiro
 
-        return (peso_sev, -valor)
+        return max_peso + score_urgencia + score_valor
 
-    return sorted(demandas, key=chave_ordenacao)
+    for d in demandas:
+        d["prioridade_score"] = calcular_score(d)
+
+    return sorted(demandas, key=lambda x: x["prioridade_score"], reverse=True)
