@@ -43,3 +43,16 @@ def format_local(value: Optional[str], name: str = DEFAULT_TZ, fmt: str = "%d/%m
     if parsed.tzinfo is None:  # linhas antigas, gravadas sem fuso
         parsed = parsed.replace(tzinfo=tz)
     return parsed.astimezone(tz).strftime(fmt)
+
+
+def parse_agora(value: str) -> datetime:
+    """Relógio simulado do cenário: '2026-11-02T08:00' -> datetime ingênuo (hora local dos dados).
+
+    Os CSVs do desafio gravam horários locais sem fuso; comparar com eles exige o mesmo tipo.
+    """
+    parsed = datetime.fromisoformat(str(value).strip())
+    return parsed.replace(tzinfo=None, second=0, microsecond=0)
+
+
+def iso_simulado(value: datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M")

@@ -1,129 +1,84 @@
-"""Contrato de saída do modelo (Pydantic v2) e política de aprovação humana (HITL).
+"""Contratos Pydantic v2 do Guardião do Lote.
 
-Princípio: o modelo *propõe*; o código *decide* o que exige aprovação. Os campos
-`requires_human_approval` e `requires_human_intervention` existem no resultado, mas
-são sempre recalculados pelos validators abaixo, nunca confiados à saída do LLM.
+Princípio herdado do kit: o modelo *propõe*, o código *decide*. Aqui ficou mais forte:
+quem gera alerta e decide retenção são as regras determinísticas (checks.py). A IA só
+devolve `ExplicacaoAlerta`, que não tem nenhum campo capaz de liberar, reter ou
+reduzir prioridade — o único efeito possível é `agravar`.
 """
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-
-class SeverityLevel(str, Enum):
-    LOW = "LOW"
-    MEDIUM = "MEDIUM"
-    HIGH = "HIGH"
-    CRITICAL = "CRITICAL"
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class ActionType(str, Enum):
-    REFRESH_TOKEN = "REFRESH_TOKEN"
-    RETRY_WEBHOOK = "RETRY_WEBHOOK"
-    CLEAR_CACHE = "CLEAR_CACHE"
-    ESCALATE_HUMAN = "ESCALATE_HUMAN"
+class Severidade(str, Enum):
+    BLOQUEIA = "BLOQUEIA"  # perda provável se sair: retém no silêncio humano
+    ACIONA = "ACIONA"      # exceção de política: avisa o dono e segue no lote
+    AGRAVA = "AGRAVA"      # nunca gera alerta sozinha: só sobe a prioridade
+
+
+class Acao(str, Enum):
+    RETER_TITULO = "RETER_TITULO"
+    LIBERAR_TITULO = "LIBERAR_TITULO"
+    ACIONAR_PESSOA = "ACIONAR_PESSOA"
     LOG_ONLY = "LOG_ONLY"
 
 
-# Ações que sempre exigem aprovação de um operador.
-REQUIRES_APPROVAL_ACTIONS = frozenset(
-    {
-        ActionType.REFRESH_TOKEN,
-        ActionType.RETRY_WEBHOOK,
-        ActionType.CLEAR_CACHE,
-        ActionType.ESCALATE_HUMAN,
-    }
-)
-
-# Ações que alteram sistemas (usadas para limitar a confiança efetiva).
-MUTATING_ACTIONS = frozenset(
-    {
-        ActionType.REFRESH_TOKEN,
-        ActionType.RETRY_WEBHOOK,
-        ActionType.CLEAR_CACHE,
-    }
-)
-
-# Severidades em que o incidente inteiro passa por revisão humana.
-HITL_SEVERITIES = frozenset({SeverityLevel.HIGH, SeverityLevel.CRITICAL})
-
-# Abaixo disso, o diagnóstico é tratado como incerto e exige revisão humana.
-LOW_CONFIDENCE_THRESHOLD = 0.6
-
-PayloadValue = Union[str, int, float, bool]
+class OrigemDecisao(str, Enum):
+    SLACK = "slack"
+    CLI = "cli"                # fila de triagem manual (plano B do Slack)
+    SILENCIO = "silencio"      # ninguém respondeu até o fechamento
+    AUTOMATICO = "automatico"  # título sem alerta segue no lote
 
 
-class RecommendedAction(BaseModel):
+class Alerta(BaseModel):
+    """Saída de cada regra de checks.py (uma linha do DataFrame de alertas)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    titulo_id: str = Field(pattern=r"^TP\d{6}$")
+    regra: str = Field(min_length=2, max_length=60)
+    severidade: Severidade
+    evidencia: str = Field(min_length=5, max_length=500)
+    valor: float = Field(ge=0)
+
+
+class ExplicacaoAlerta(BaseModel):
+    """Única coisa que a IA pode devolver. Enviada como schema ao modelo."""
+
     model_config = ConfigDict(extra="forbid")
 
-    action_type: ActionType = Field(description="Tipo de ação recomendada.")
-    description: str = Field(
-        max_length=300, description="O que a ação fará, em uma frase."
+    titulo_id: str = Field(description="Repita exatamente o titulo_id do alerta.")
+    resumo: str = Field(
+        min_length=10,
+        max_length=300,
+        description="Explicação do risco em até 2 frases, para quem vai aprovar. Só fatos da evidência.",
     )
-    payload: Optional[Dict[str, PayloadValue]] = Field(
-        default=None,
-        description=(
-            "Parâmetros técnicos em objeto plano (chave -> texto/número/booleano). "
-            "Use apenas identificadores presentes no log."
-        ),
+    comunicacoes_citadas: List[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="IDs EM... das comunicações que sustentam o resumo (vazio se nenhuma).",
     )
-    requires_human_approval: bool = Field(
-        default=True,
-        description="Definido pelo sistema; não é decisão do modelo.",
+    agravar: bool = Field(
+        default=False,
+        description="True só se alguma comunicação indicar risco maior (ex.: pedido de troca de conta).",
     )
 
-    @model_validator(mode="after")
-    def enforce_hitl_policy(self):
-        # Derivado do tipo da ação; qualquer valor vindo do modelo é descartado.
-        # O resultado agregado (LogAnalysisResult) pode elevar para True por
-        # severidade alta ou baixa confiança.
-        self.requires_human_approval = self.action_type in REQUIRES_APPROVAL_ACTIONS
-        return self
-
-    @model_validator(mode="after")
-    def limit_payload_size(self):
-        if self.payload is not None and len(self.payload) > 8:
-            raise ValueError("payload excede 8 chaves")
-        return self
+    @field_validator("comunicacoes_citadas")
+    @classmethod
+    def ids_de_comunicacao(cls, value: List[str]) -> List[str]:
+        for item in value:
+            if not (item.startswith("EM") and item[2:].isdigit()):
+                raise ValueError(f"'{item}' não é um id de comunicação (EM + dígitos)")
+        return value
 
 
-class LogAnalysisResult(BaseModel):
+class Decisao(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    service_name: str = Field(
-        max_length=80, description="Serviço ou integração impactada."
-    )
-    severity: SeverityLevel = Field(description="Severidade conforme a régua do cenário.")
-    root_cause: str = Field(
-        max_length=600, description="Causa raiz técnica, baseada apenas no log."
-    )
-    confidence_score: float = Field(
-        ge=0.0, le=1.0, description="Confiança do diagnóstico (0.0 a 1.0)."
-    )
-    recommended_actions: List[RecommendedAction] = Field(
-        min_length=1, max_length=5, description="Ações propostas."
-    )
-    requires_human_intervention: bool = Field(
-        default=True,
-        description="Definido pelo sistema; não é decisão do modelo.",
-    )
-
-    @model_validator(mode="after")
-    def sync_hitl_flags(self):
-        force_review = (
-            self.severity in HITL_SEVERITIES
-            or self.confidence_score < LOW_CONFIDENCE_THRESHOLD
-        )
-        if force_review:
-            for action in self.recommended_actions:
-                action.requires_human_approval = True
-        self.requires_human_intervention = force_review or any(
-            action.requires_human_approval for action in self.recommended_actions
-        )
-        return self
-
-    def force_review(self) -> None:
-        """Exige revisão humana em todas as ações (usado pela política de confiança efetiva)."""
-        for action in self.recommended_actions:
-            action.requires_human_approval = True
-        self.requires_human_intervention = True
+    titulo_id: str = Field(pattern=r"^TP\d{6}$")
+    lote_remessa: str = Field(min_length=3, max_length=40)
+    acao: Acao
+    decidido_por: str = Field(min_length=1, max_length=80)
+    origem: OrigemDecisao
+    motivo: Optional[str] = Field(default=None, max_length=300)
