@@ -1,0 +1,14 @@
+venv/
+.venv/
+.env
+__pycache__/
+.streamlit/
+.pytest_cache/
+data/
+*.db
+
+# dados do desafio (nao versionar)
+pagamentos/
+
+.env*
+!.env.example
