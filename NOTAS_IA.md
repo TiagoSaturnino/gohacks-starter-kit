@@ -112,6 +112,7 @@ as tabelas do item 3.
 **Pendente para o item 4:** o guardião deve injetar `pol['guardiao']['dias_lancador_recente']` a
 partir de `config.dias_lancador_recente` antes de `rodar_regras()`. O priorizador deve garantir que
 A1 (AGRAVA) nunca gere alerta sozinha nem retenção.
+<<<<<<< HEAD
 
 ## Itens 4 (refeito), 5, 6 e 7 — guardião completo, IA, Slack, relatório e e2e (2026-11-07)
 
@@ -137,3 +138,5 @@ fail-safe: BLOQUEIA fica retido desde o início e só sai com "Liberar" humano.
 `rotear.py`); fraude = R5/R6 → coordenadora (1ª pessoa da política) + PS08; diretoria pelo limiar de
 `alcadas.diretora_financeira`. Placar: acionamento desnecessário aproximado como um por título
 liberado pelo humano. A2 (Jev nas comunicações) não foi ligado ao CLI.
+=======
+>>>>>>> 0befe969dce2620aeabb47a698aea167f6cf1d50

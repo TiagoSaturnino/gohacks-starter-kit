@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 """Prioridade dos títulos alertados (SPEC §5, passo 4).
 
 score = peso da severidade × valor × urgência, com urgência = 1 / (horas até o fechamento + 1).
@@ -41,3 +42,29 @@ def priorizar(alertas: pd.DataFrame, agenda: pd.DataFrame, agora: pd.Timestamp) 
     return (pd.DataFrame(linhas, columns=colunas)
             .sort_values(["fechamento", "score"], ascending=[True, False], kind="stable")
             .reset_index(drop=True))
+=======
+﻿from datetime import datetime
+from typing import List, Dict, Any
+
+def priorizar_demandas(demandas: List[Dict[str, Any]], data_referencia: datetime = None) -> List[Dict[str, Any]]:
+    pesos_severidade = {
+        "CRITICO": 1,
+        "ALTO": 2,
+        "MEDIO": 3,
+        "BAIXO": 4
+    }
+
+    def chave_ordenacao(item: Dict[str, Any]):
+        sev = str(item.get("severidade", "BAIXO")).upper()
+        peso_sev = pesos_severidade.get(sev, 5)
+
+        valor = item.get("valor", 0.0)
+        try:
+            valor = float(valor)
+        except (ValueError, TypeError):
+            valor = 0.0
+
+        return (peso_sev, -valor)
+
+    return sorted(demandas, key=chave_ordenacao)
+>>>>>>> 0befe969dce2620aeabb47a698aea167f6cf1d50
