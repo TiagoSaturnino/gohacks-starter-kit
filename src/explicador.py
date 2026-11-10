@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from src.gateway import IAProxy, UsoIA
 from src.guardrails import check_explicacao
 from src.pii import mask_pii
-from src.schemas import Alerta, ExplicacaoAlerta
+from src.schemas import Alerta, ExplicacaoAlerta, Severidade
 from src.store import Store, short_hash
 
 logger = logging.getLogger("guardiao.explicador")
@@ -27,7 +27,9 @@ SYSTEM_PROMPT = (
     "4. Marque agravar=true apenas se alguma comunicação indicar risco maior para ESTE título "
     "(pedido de troca de conta, segunda via com banco novo, remetente fora do canal do cadastro, "
     "urgência de alguém que se diz diretor). Cite os IDs EM... usados.\n"
-    "5. Dados bancários e documentos aparecem mascarados; não tente recuperá-los."
+    "5. Dados bancários e documentos aparecem mascarados; não tente recuperá-los.\n"
+    "6. O campo resumo é texto puro, em uma linha: sem Markdown, emojis, listas, títulos nem "
+    "recomendação de ação. A formatação e a ação são montadas pelo sistema."
 )
 
 class ResultadoExplicacao(BaseModel):
@@ -41,6 +43,71 @@ def texto_modelo(alerta: Alerta) -> ExplicacaoAlerta:
     if len(resumo) > 300:
         resumo = resumo[:297] + "..."
     return ExplicacaoAlerta(titulo_id=alerta.titulo_id, resumo=resumo, comunicacoes_citadas=[], agravar=False)
+
+# ---------------------------------------------------------------------------
+# Camada de apresentação (só texto/Markdown; nenhuma regra de negócio aqui).
+# O modelo continua devolvendo `ExplicacaoAlerta` (JSON validado). O Markdown é
+# montado em código, para ser rígido, idêntico em LIVE/CACHE/MODELO e sem mexer
+# no cache versionado.
+# ---------------------------------------------------------------------------
+MAX_LINHAS_ACAO = 3
+
+# severidade -> (emoji, rótulo do cabeçalho). Espelha SPEC §4: BLOQUEIA retém, ACIONA segue.
+_STATUS = {
+    Severidade.BLOQUEIA: ("🔴", "Retenção recomendada"),
+    Severidade.ACIONA: ("🟡", "Atenção, segue no lote"),
+}
+_STATUS_LIBERADO = ("🟢", "Liberado por decisão humana")
+
+# Ações por severidade, só reformulam o fluxo já definido em SPEC §5 (passos 6 e 7).
+_ACAO = {
+    Severidade.BLOQUEIA: [
+        "Manter o título retido até a decisão humana (Reter ou Liberar).",
+        "Sem resposta até o fechamento do lote, ele segue retido.",
+    ],
+    Severidade.ACIONA: [
+        "O título segue no lote e o responsável foi acionado.",
+        "Sem resposta até o fechamento, segue como está e fica registrado.",
+    ],
+}
+_ACAO_LIBERADO = ["Liberado por decisão humana.", "Decisão registrada na auditoria."]
+
+
+def _brl(valor: float) -> str:
+    inteiro, cent = f"{abs(float(valor)):,.2f}".split(".")
+    return f"R$ {inteiro.replace(',', '.')},{cent}"
+
+
+def _md(texto: str) -> str:
+    """Uma linha só e `$` escapado (o st.markdown do Streamlit trata $...$ como LaTeX)."""
+    return " ".join(str(texto).split()).replace("$", "\\$")
+
+
+def acao_recomendada(alerta: Alerta, liberado: bool = False) -> List[str]:
+    """Recomendação objetiva, no máximo MAX_LINHAS_ACAO linhas, derivada só da severidade."""
+    linhas = _ACAO_LIBERADO if liberado else _ACAO.get(alerta.severidade, _ACAO[Severidade.ACIONA])
+    return linhas[:MAX_LINHAS_ACAO]
+
+
+def formatar_markdown(alerta: Alerta, resultado: ResultadoExplicacao, liberado: bool = False) -> str:
+    """Relatório executivo em Markdown para st.markdown (e legível como texto puro)."""
+    emoji, rotulo = _STATUS_LIBERADO if liberado else _STATUS.get(alerta.severidade, _STATUS[Severidade.ACIONA])
+    expl = resultado.explicacao
+    linhas = [
+        f"### {emoji} {alerta.titulo_id} · {rotulo}",
+        f"- **Regra:** `{alerta.regra}` · **Severidade:** {alerta.severidade.value}",
+        f"- **Valor:** {_md(_brl(alerta.valor))}",
+        f"- **Por que:** {_md(expl.resumo)}",
+    ]
+    if expl.comunicacoes_citadas:
+        linhas.append("- **Comunicações citadas:** " + ", ".join(f"`{c}`" for c in expl.comunicacoes_citadas))
+    if expl.agravar:
+        linhas.append("- **⚠️ Agravante:** comunicação do fornecedor aumenta o risco deste título.")
+    linhas.append("")
+    linhas.append("**Ação recomendada**")
+    linhas.extend(f"- {_md(l)}" for l in acao_recomendada(alerta, liberado))
+    return "\n".join(linhas)
+
 
 def _formatar_comunicacoes(comunicacoes: List[Dict[str, Any]]) -> str:
     partes = []

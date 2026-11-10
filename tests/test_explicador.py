@@ -62,3 +62,28 @@ def test_jev_sinal_troca_conta(settings, breaker, tmp_path):
 def test_jev_sem_ia_devolve_none(settings, breaker, tmp_path):
     exp, _ = _expl(tmp_path, settings=settings, breaker=breaker)
     assert exp.sinal_troca_conta(COMUNICACAO) is None
+
+
+def test_markdown_bloqueia_tem_estrutura_e_acao_curta():
+    from src.explicador import MAX_LINHAS_ACAO, ResultadoExplicacao, formatar_markdown
+    r = ResultadoExplicacao(origem="MODELO", explicacao=texto_modelo(ALERTA))
+    md = formatar_markdown(ALERTA, r)
+    assert md.startswith("### 🔴 TP431502")
+    assert "**Regra:** `R5_conta_alterada`" in md and "**Por que:**" in md
+    acao = md.split("**Ação recomendada**\n")[1].splitlines()
+    assert 1 <= len(acao) <= MAX_LINHAS_ACAO and all(l.startswith("- ") for l in acao)
+
+
+def test_markdown_escapa_cifrao_e_achata_quebras():
+    from src.explicador import ResultadoExplicacao, formatar_markdown
+    from src.schemas import ExplicacaoAlerta
+    e = ExplicacaoAlerta(titulo_id="TP431502", resumo="Conta trocada.\n\n# Pague R$ 10 ou R$ 20", comunicacoes_citadas=["EM570999"], agravar=True)
+    md = formatar_markdown(ALERTA, ResultadoExplicacao(origem="LIVE", explicacao=e))
+    assert "\\$" in md and "R$ 1.180,86".replace("$", "\\$") in md
+    assert "\n# Pague" not in md and "`EM570999`" in md and "Agravante" in md
+
+
+def test_markdown_liberado_usa_verde():
+    from src.explicador import ResultadoExplicacao, formatar_markdown
+    r = ResultadoExplicacao(origem="CACHE", explicacao=texto_modelo(ALERTA))
+    assert formatar_markdown(ALERTA, r, liberado=True).startswith("### 🟢")
