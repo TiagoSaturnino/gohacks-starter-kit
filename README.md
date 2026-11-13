@@ -2,18 +2,11 @@
 
 [![Tests](https://github.com/TiagoSaturnino/gohacks-starter-kit/actions/workflows/tests.yml/badge.svg)](https://github.com/TiagoSaturnino/gohacks-starter-kit/actions/workflows/tests.yml)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white)
-[![Streamlit](https://img.shields.io/badge/demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://SEU-APP.streamlit.app)
+[![Streamlit](https://img.shields.io/badge/demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://guardiao-lote.streamlit.app)
 
 > Antes de cada lote de remessa fechar, o Guardião acha os títulos que fariam **dinheiro sair indevidamente** (duplicidade, valor errado, conta trocada por golpista, boleto falso, NF inexistente), segura-os para aprovação humana no Slack e registra tudo em auditoria. Projeto do **GoHacks Talent 2026** (desafio Pagamentos).
 
-**🔗 Demo pública:** https://SEU-APP.streamlit.app
-
-<p align="center">
-  <img src="docs/img/dashboard.png" alt="Painel executivo do Guardião do Lote" width="900">
-</p>
-<p align="center">
-  <img src="docs/img/slack-alerta.png" alt="Alerta no Slack com botões Reter e Liberar" width="520">
-</p>
+**🔗 Demo pública:** https://guardiao-lote.streamlit.app
 
 ---
 
