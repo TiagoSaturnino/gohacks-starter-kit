@@ -13,8 +13,12 @@ import pandas as pd
 import streamlit as st
 
 MIN_POR_TITULO = 3  # premissa de conferência manual (mesma do pitch)
-REL = Path("data/relatorio_executivo.json")
-AGENDA = Path("data/agenda_simulada.csv")
+REL_VIVO, AGENDA_VIVA = Path("data/relatorio_executivo.json"), Path("data/agenda_simulada.csv")
+REL_DEMO, AGENDA_DEMO = Path("demo/relatorio_executivo.json"), Path("demo/agenda_simulada.csv")
+# Na nuvem (Streamlit Community Cloud) data/ não existe: os dados do desafio não são versionados.
+# Sem a rodada local, o painel lê o snapshot da pasta demo/ (só agregados).
+EM_DEMO = not REL_VIVO.exists() and REL_DEMO.exists()
+REL, AGENDA = (REL_DEMO, AGENDA_DEMO) if EM_DEMO else (REL_VIVO, AGENDA_VIVA)
 
 
 def brl(v: float) -> str:
@@ -36,9 +40,13 @@ topo, botao = st.columns([5, 1])
 topo.title("🛡️ Guardião do Lote")
 topo.caption(f"Gogroup · contas a pagar · agenda de remessa às {rel.get('agora', '').replace('T', ' ')}")
 botao.write("")
-botao.button("🔄 Atualizar", use_container_width=True)
+botao.button("🔄 Atualizar", width="stretch")
+if EM_DEMO:
+    st.info("Modo demonstração: snapshot de uma rodada do guardião (valores agregados). "
+            "Para ver decisões ao vivo, rode o projeto localmente.")
 
-retidos_agora = int((agenda.get("status_guardiao", pd.Series(dtype=str)) == "retido").sum())
+retidos_agora = (int((agenda["status_guardiao"] == "retido").sum()) if "status_guardiao" in agenda
+                 else int(rel.get("retidos", 0)))
 liberados = agenda[agenda.get("status_guardiao", pd.Series(dtype=str)) == "liberado"] if not agenda.empty else agenda
 total = int(rel.get("titulos_na_agenda", 0))
 horas_antes = total * MIN_POR_TITULO / 60
@@ -63,16 +71,16 @@ with esq:
 with dir_:
     st.subheader("Alertas por regra")
     regras = pd.DataFrame(list(rel.get("contagem_por_regra", {}).items()), columns=["regra", "títulos"])
-    st.dataframe(regras, hide_index=True, use_container_width=True, height=300)
+    st.dataframe(regras, hide_index=True, width="stretch", height=300)
 
 st.subheader("Decisões humanas")
 if len(liberados):
     st.dataframe(liberados[["lote_remessa", "titulo_id", "valor", "status_guardiao", "decidido_por", "decidido_em"]],
-                 hide_index=True, use_container_width=True)
+                 hide_index=True, width="stretch")
 else:
     st.info("Nenhuma decisão humana ainda. Sem resposta até o fechamento, os títulos seguem retidos.")
 
 with st.expander("Ver títulos retidos e o motivo"):
     if not agenda.empty:
         st.dataframe(agenda[agenda["status_guardiao"] == "retido"][["lote_remessa", "titulo_id", "valor", "motivo"]],
-                     hide_index=True, use_container_width=True)
+                     hide_index=True, width="stretch")
