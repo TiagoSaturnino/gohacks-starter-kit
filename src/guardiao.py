@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -29,19 +29,21 @@ MOTIVO_SILENCIO = "sem decisão humana"
 N_EXPLICACOES = 3
 
 
-def _explicar(top: pd.DataFrame, alertas: pd.DataFrame, settings, store: Store) -> List[str]:
+def _explicar(top: pd.DataFrame, alertas: pd.DataFrame, settings, store: Store) -> Tuple[List[str], List[str]]:
     """Explicação dos títulos mais urgentes. Sem IA ou com falha: cache ou texto-modelo."""
-    from src.explicador import Explicador
+    from src.explicador import Explicador, formatar_markdown
     from src.gateway import IAProxy
 
     explicador = Explicador(IAProxy(settings), settings.cache_dir, store)
-    saida = []
+    saida, md = [], []
     for tid in top["titulo_id"]:
         linha = alertas[(alertas["titulo_id"] == tid)
                         & (alertas["severidade"] == Severidade.BLOQUEIA.value)].iloc[0]
-        r = explicador.explicar(Alerta.model_validate(linha.to_dict()))
+        alerta = Alerta.model_validate(linha.to_dict())
+        r = explicador.explicar(alerta)
         saida.append(f"{tid} [{r.origem}]: {r.explicacao.resumo}")
-    return saida
+        md.append(formatar_markdown(alerta, r))
+    return saida, md
 
 
 def executar(agora: str, sem_ia: bool = True, sem_slack: bool = True, dados: Optional[str] = None,
@@ -92,16 +94,17 @@ def executar(agora: str, sem_ia: bool = True, sem_slack: bool = True, dados: Opt
         retidos.append(t.titulo_id)
 
     explicacoes: List[str] = []
+    explicacoes_md: List[str] = []
     if not sem_ia:
         top = prio[prio["titulo_id"].isin(retidos)].head(N_EXPLICACOES)
         try:
-            explicacoes = _explicar(top, alertas, settings, store)
+            explicacoes, explicacoes_md = _explicar(top, alertas, settings, store)
         except Exception as erro:  # IA nunca derruba o guardião
             explicacoes = [f"(explicação indisponível: {type(erro).__name__})"]
 
     r = relatorio.calcular(base, pol, alertas, retidos, liberados_humano, n_acionamentos)
     r.update({"agora": agora, "modo": "deterministico" if sem_ia else "com_ia",
-              "retidos_ids": sorted(retidos), "explicacoes": explicacoes})
+              "retidos_ids": sorted(retidos), "explicacoes": explicacoes, "explicacoes_md": explicacoes_md})
     saida_dir.mkdir(parents=True, exist_ok=True)
     (saida_dir / "relatorio_executivo.json").write_text(
         json.dumps(r, indent=2, ensure_ascii=False, default=str), encoding="utf-8")

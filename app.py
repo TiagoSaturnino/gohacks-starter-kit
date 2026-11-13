@@ -80,6 +80,12 @@ if len(liberados):
 else:
     st.info("Nenhuma decisão humana ainda. Sem resposta até o fechamento, os títulos seguem retidos.")
 
+if rel.get("explicacoes_md"):
+    st.subheader("🧠 Análise Executiva dos Principais Alertas")
+    for bloco in rel["explicacoes_md"]:
+        st.markdown(bloco)
+        st.divider()
+
 with st.expander("Ver títulos retidos e o motivo"):
     if not agenda.empty:
         st.dataframe(agenda[agenda["status_guardiao"] == "retido"][["lote_remessa", "titulo_id", "valor", "motivo"]],

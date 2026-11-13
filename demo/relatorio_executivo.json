@@ -1,0 +1,47 @@
+{
+  "agora": "2026-11-02T08:00",
+  "modo": "com_ia",
+  "titulos_na_agenda": 876,
+  "titulos_com_alerta": 106,
+  "contagem_por_regra": {
+    "R1_duplicidade": 13,
+    "R2_valor_x_duplicata": 11,
+    "R3_nf_inexistente": 2,
+    "R4_oc_x_nf": 2,
+    "R5_conta_alterada": 25,
+    "R6_boleto_divergente": 4,
+    "A1_lancador_recente": 161
+  },
+  "retidos": 52,
+  "valor_de_face_retido": 642811.33,
+  "retidos_por_lote": [
+    {
+      "lote": "RM20261103-MER",
+      "fechamento": "03/11 10:00",
+      "titulos": 28,
+      "valor": 312450.0
+    },
+    {
+      "lote": "RM20261103-SRV",
+      "fechamento": "03/11 14:00",
+      "titulos": 16,
+      "valor": 215921.25
+    },
+    {
+      "lote": "RM20261104-FIN",
+      "fechamento": "04/11 10:00",
+      "titulos": 8,
+      "valor": 114440.08
+    }
+  ],
+  "liberados_pelo_humano": 0,
+  "rs_protegido": 625095.75,
+  "custo_maximo_fp": 68556.12,
+  "acionamentos": 40,
+  "custo_teto_acionamentos": 2400.0,
+  "placar_estimado": 625095.75,
+  "explicacoes_md": [
+    "### 🔴 TP431502 · Retenção recomendada\n- **Regra:** R5_conta_alterada · **Severidade:** BLOQUEIA\n- **Valor:** R\\$ 48.920,00\n- **Por que:** Alteração de dados bancários solicitada por e-mail sem confirmação por ligação no telefone cadastrado há mais de 30 dias.\n- **Comunicações citadas:** EM570999\n- **⚠️ Agravante:** comunicação do fornecedor aumenta o risco deste título.\n\n**Ação recomendada**\n- Manter o título retido até a decisão humana (Reter ou Liberar).\n- Sem resposta até o fechamento do lote, ele segue retido.",
+    "### 🔴 TP431884 · Retenção recomendada\n- **Regra:** R1_duplicidade · **Severidade:** BLOQUEIA\n- **Valor:** R\\$ 32.150,00\n- **Por que:** Título duplicado para o mesmo fornecedor, nota fiscal e parcela já agendados anteriormente no lote.\n\n**Ação recomendada**\n- Manter o título retido até a decisão humana (Reter ou Liberar).\n- Sem resposta até o fechamento do lote, ele segue retido."
+  ]
+}
