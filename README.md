@@ -1,98 +1,93 @@
-<<<<<<< HEAD
-# 🛡️ Guardião de Pagamentos — AI Governance & Resilient Batch Engine
+$readme = @'
+# 🛡️ Guardião do Lote
 
-![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)
-![Pytest](https://img.shields.io/badge/Tests-129%20Passed-success?logo=pytest)
-![Architecture](https://img.shields.io/badge/Architecture-Modular%20%2F%20Clean-orange)
-![License](https://img.shields.io/badge/License-MIT-green)
+[![Tests](https://github.com/TiagoSaturnino/gohacks-starter-kit/actions/workflows/tests.yml/badge.svg)](https://github.com/TiagoSaturnino/gohacks-starter-kit/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue?logo=python&logoColor=white)
+[![Streamlit](https://img.shields.io/badge/demo-Streamlit-FF4B4B?logo=streamlit&logoColor=white)](https://guardiao-lote.streamlit.app)
 
-> Engine autônoma em Python voltada para governança financeira, detecção de riscos em lotes de remessa bancária, priorização por horário de fechamento e workflows de *Human-in-the-Loop* via Slack.
+> Antes de cada lote de remessa fechar, o Guardião identifica os títulos que fariam **dinheiro sair indevidamente** (duplicidade, valor divergente, conta alterada sem confirmação, boleto suspeito, NF inexistente), retém os casos críticos para aprovação humana no Slack e registra toda a trilha em auditoria. Projeto desenvolvido para o **GoHacks Talent 2026** (desafio Pagamentos).
+
+**🔗 Painel Executivo ao vivo:** https://guardiao-lote.streamlit.app
 
 ---
 
 ## 💡 O Problema & A Solução
 
-Processar lotes de pagamento de forma puramente manual ou sem validações estritas expõe a empresa a duplicidades, fraudes e falhas operacionais críticas ("abrir a torneira" de dinheiro por erro). 
+Processar lotes de pagamento sem travas automatizadas expõe o caixa a duplicidades e fraudes; por outro lado, bloquear tudo gera custo operacional e atraso com fornecedores legítimos. O **Guardião do Lote** equilibra essa decisão separando claramente o que é determinístico, o que é IA e o que exige aprovação humana:
 
-O **Guardião de Pagamentos** resolve esse gargalo através de 4 pilares:
-1. **Regras Determinísticas Offline:** Validação estrita de regras de negócio (R1 a R8 + A1) para identificar inconsistências e duplicidades de títulos.
-2. **Severidade Granular & Fail-Closed:** Apenas severidades do tipo `BLOQUEIA` retêm pagamentos. Em caso de falha de sistema, o motor adota *fail-closed* por segurança.
-3. **Priorização por Urgência & Impacto:** Classifica demandas cruzando o horário limite de fechamento do lote com o valor financeiro consolidado em R\$.
-4. **Agente com Humano no Circuito (*Human-in-the-Loop*):** Disparo de alertas interativos estruturados no Slack via Block Kit para aprovação gerencial.
+| Quem | Decide | Onde | Por quê |
+|---|---|---|---|
+| **Código** | Se gera alerta, severidade, quem acionar e retenção | `src/checks.py` | Determinístico, auditável e funciona 100% offline |
+| **IA (Gateway)** | Explicação executiva em linguagem natural e sinal de agravamento | `src/explicador.py`, `src/schemas.py` | Resume evidências e lê e-mails; o schema não permite reter nem liberar sozinho |
+| **Humano (Slack)** | Reter ou liberar cada título bloqueado | `src/slack_bot.py` | Alçada, exceção e fraude exigem decisão humana (*Human-in-the-Loop*) |
+| **Executor** | Grava decisão na agenda simulada e audita | `src/executors.py`, `src/store.py` | Preserva a base original intacta e mantém histórico completo |
+
+### Garantias de Engenharia & Segurança
+
+- **Fail-closed:** títulos com severidade `BLOQUEIA` sem resposta humana até o fechamento permanecem **retidos**.
+- **Resiliência sem crédito/rede:** fluxo em cascata (`cache em disco` $\rightarrow$ `AI Proxy` $\rightarrow$ `texto-modelo` determinístico) com *Circuit Breaker* (`src/resilience.py`). O conjunto de títulos retidos não muda com ou sem IA.
+- **Anti-alucinação & Anti-injection:** saídas da IA validadas por Pydantic v2 + ancoragem estrita de identificadores (`src/guardrails.py`). Comunicações de fornecedores são tratadas exclusivamente como dados.
+- **Privacidade (LGPD):** CPF, CNPJ, telefone, conta bancária, linha digitável e chave Pix são mascarados antes de qualquer chamada externa ou envio ao Slack (`src/pii.py`).
+- **Idempotência:** reexecutar o pipeline não duplica alertas, acionamentos nem decisões (`src/store.py`).
 
 ---
 
 ## 📐 Arquitetura do Sistema
 
 ```mermaid
-graph TD
-    A[Agenda de Remessa / CSV] --> B[src/carga.py: Ingestão & Políticas]
-    B --> C[src/checks.py: Regras Determinísticas]
-    C --> D[src/priorizar.py: Scoring & Urgência]
-    D --> E[src/rotear.py: Fail-Closed & Decisão]
-    E -->|Bloqueia| F[src/slack.py: Alerta Block Kit / Slack]
-    E -->|Salva| G[data/guardiao.db: SQLite Audit Trail]
-    E -->|Gera| H[app.py: Streamlit Dashboard Executivo]
+flowchart LR
+    CSV[("CSVs do desafio<br/>pagamentos/")] --> CARGA["carga.py<br/>normaliza e valida"]
+    CARGA --> CHECKS["checks.py<br/>regras R1 a R8 + A1"]
+    CHECKS --> PRIO["priorizar.py<br/>severidade × valor × urgência"]
+    PRIO --> ROTEAR["rotear.py<br/>1 mensagem por pessoa e lote"]
+    ROTEAR --> SLACK["slack_bot.py<br/>botões Reter / Liberar"]
+    SLACK -->|decisão humana| EXEC
+    PRIO -->|sem resposta no fechamento| EXEC["executors.py<br/>agenda_simulada.csv"]
+    EXEC --> DB[("store.py<br/>SQLite de auditoria")]
+    DB --> REL["relatorio.py<br/>placar estimado em R$"]
+    REL --> APP["app.py<br/>painel Streamlit"]
+
+    subgraph IA ["IA (opcional)"]
+        EXPL["explicador.py<br/>cache → IA → texto-modelo"] --> GW["gateway.py<br/>AI Proxy + circuit breaker"]
+        EXPL --> GR["guardrails.py<br/>ancoragem na evidência"]
+    end
+    CHECKS -.->|explica alertas| EXPL
+    EXPL -.->|texto e agravar| REL
 ```
-🛠️ Funcionalidades PrincipaisMóduloResponsabilidade Técnicasrc/checks.pyAplicação de regras estáticas de conformidade e detecção de riscos.src/priorizar.pyCálculo de score considerando o horário de fechamento e valor financeiro (R$).src/rotear.pyLógica de decisão baseada em severidade (BLOQUEIA vs ACIONA) com fail-closed.src/slack.pyIntegração via Webhook com Slack (Block Kit e botões interativos).src/guardiao.pyOrquestrador CLI central e consolidação de relatórios executivos em JSON.app.pyInterface interativa em Streamlit para auditoria executiva e filtros de lotes.🚀 Como Executar o Projeto LocalmentePré-requisitosPython 3.10+GitPasso a PassoClonar o repositório:Bashgit clone [https://github.com/TiagoSaturnino/gohacks-starter-kit.git](https://github.com/TiagoSaturnino/gohacks-starter-kit.git)
+Regras Implementadas#RegraSeveridadeR1Duplicidade (fornecedor + NF normalizada + parcela)BLOQUEIAR2Valor do título × duplicata da NF (com carência de dia útil)BLOQUEIAR3Nota Fiscal inexistente no portalBLOQUEIAR4Ordem de Compra × NF e recebimento de mercadoriaACIONAR5Conta alterada sem confirmação válida por ligação (TED/Pix)BLOQUEIAR6Boleto divergente (DDA, beneficiário, banco histórico)BLOQUEIAR7Fracionamento para fugir de alçadaACIONAR8Segregação de funçõesACIONAA1 / A2Lançador recente / comunicação suspeita (IA)AGRAVA (sobe prioridade)A especificação completa e as decisões de calibração estão documentadas em SPEC.md.🚀 Como Executar LocalmenteRequer Python 3.11+ (pandas 3.x exige versão $\ge$ 3.11).PowerShellgit clone [https://github.com/TiagoSaturnino/gohacks-starter-kit.git](https://github.com/TiagoSaturnino/gohacks-starter-kit.git)
 cd gohacks-starter-kit
-Criar e ativar o ambiente virtual:Bashpython -m venv .venv
-# Windows (PowerShell):
-.\.venv\Scripts\Activate.ps1
-# Linux/Mac:
-source .venv/bin/activate
-Instalar dependências:Bashpip install -r requirements.txt
-Configurar variáveis de ambiente (Opcional - Slack):
-Crie um arquivo .env na raiz do projeto:Snippet de códigoSLACK_WEBHOOK_URL="sua_url_do_webhook_aqui"
-Executar a suíte de testes:Bashpytest
-Rodar o pipeline do Guardião (Modo CLI):Bashpython -m src.guardiao --agora 2026-11-02T08:00 --sem-ia --sem-slack
-Iniciar a interface Streamlit:Bashpython -m streamlit run app.py
-🧪 Cobertura de TestesO projeto conta com suíte de testes unitários e de integração automatizados via pytest:Bashroot@career-ops:# pytest -v
-========================== test session starts ==========================
-tests/test_checks.py ........................................... [PASS]
-tests/test_e2e.py .............................................. [PASS]
-tests/test_gateway.py .......................................... [PASS]
-========================== 129 passed in 14.91s ==========================
-=======
-# Guardião do Lote — GoHacks Talent 2026 (desafio Pagamentos)
-
-Antes de cada lote de remessa fechar, acha os títulos que fariam dinheiro sair
-indevidamente (duplicidade, valor errado, conta trocada por golpista, boleto falso),
-pede decisão humana no Slack e registra tudo em auditoria. Construído sobre o meu
-kit-base (Pydantic v2, aprovação humana em código, PII mascarada, fila manual
-fail-safe, auditoria SQLite). Especificação completa: `SPEC.md`.
-
-## Quem decide o quê
-
-| Quem | Decide | Onde |
-|---|---|---|
-| Código | se o título gera alerta, severidade, quem acionar, se fica retido | `src/checks.py` (itens 2–3 do SPEC) |
-| IA, via gateway | só a explicação e o sinal "agravar"; o schema nem tem campo para reter/liberar | `src/explicador.py`, `src/schemas.py` |
-| Humano (Slack) | reter ou liberar | item 6 do SPEC |
-| Agente | executa a decisão na agenda simulada e audita | `src/executors.py`, `src/store.py` |
-
-## Garantias
-
-| Garantia | Como | Onde |
-|---|---|---|
-| Uma porta só para IA | Todo modelo passa pelo AI Proxy do evento (formato OpenAI): `chat_json` para texto, Jev para decisão tipada barata. DeepSeek bloqueado | `src/gateway.py` |
-| Custo visível | Toda chamada registra tokens (chat) ou US$ estimado (Jev) em `usos_ia` e no log `[custo]`. Chat não tem preço por chamada: não inventamos | `src/gateway.py`, `src/store.py` |
-| IA não inventa | Saída validada por Pydantic + ancoragem: IDs citados precisam estar na evidência. 1 reparo, depois texto-modelo | `src/guardrails.py` |
-| Plano B sem crédito | Cache em disco → gateway → texto-modelo. Breaker abre após 3 falhas. Retenções não mudam sem IA | `src/explicador.py`, `src/resilience.py` |
-| Dados bancários não saem crus | Linha digitável, chave de acesso, conta, destino e pix mascarados no prompt; máscara parcial no Slack | `src/pii.py` |
-| Re-execução segura | Alertas e acionamentos idempotentes; vale a última decisão por título e lote; dois relógios (real e simulado) | `src/store.py` |
-| Original intocado | Escrita simulada em `data/agenda_simulada.csv` | `src/executors.py` |
-
-## Rodar (Windows / PowerShell)
-
-```powershell
-py -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements-dev.txt
-Copy-Item .env.example .env      # coloque o AI_PROXY_API_KEY e USE_IA=True para usar IA
-pytest
-python -m src.gateway --ping --jev   # teste de fumaça do gateway (mostra a linha [custo])
-```
+Copy-Item .env.example .env
+Comandos PrincipaisPowerShell# 1. Rodar a suíte de testes automatizados (unitários e ponta a ponta)
+python -m pytest -q
 
-Os CSVs do desafio ficam em `./pagamentos` (fora do git).
->>>>>>> 0befe969dce2620aeabb47a698aea167f6cf1d50
+# 2. Executar o motor do Guardião (com os CSVs em pagamentos/)
+python -m src.guardiao --agora 2026-11-02T08:00 --sem-ia --sem-slack
+
+# 3. Abrir o painel executivo localmente (usa demo/ se data/ não existir)
+streamlit run app.py
+
+# 4. Iniciar o bot interativo do Slack em Socket Mode
+python -m src.slack_bot --agora 2026-11-02T08:00
+📁 Estrutura do ProjetoPlaintextapp.py              Painel executivo em Streamlit (modo ao vivo e modo demo)
+src/                Motor: carga, checks, priorizar, rotear, guardiao, slack_bot,
+                    explicador, gateway, guardrails, pii, store, executors, relatorio
+tests/              Suíte pytest (139+ testes unitários e e2e)
+demo/               Snapshot agregado utilizado no deploy público do Streamlit
+SPEC.md             Especificação de regras e arquitetura
+'@
+[System.IO.File]::WriteAllText("$PWD\README.md", $readme)
+Write-Host "README.md atualizado com sucesso!"
+### 2. Subir e corrigir a branch `main` no GitHub
+Para que quem abrir o link principal do seu GitHub (`[github.com/TiagoSaturnino/gohacks-starter-kit](https://github.com/TiagoSaturnino/gohacks-starter-kit)`) veja esse código limpo e não aquela `main` antiga com conflito, rode:
+
+```powershell
+git checkout feat/explicador-markdown
+git add README.md
+git commit -m "docs: limpa README definitivo com link da demo e arquitetura"
+git push origin feat/explicador-markdown
+
+# Atualiza a branch main remota com a versão limpa e passa nos testes do GitHub Actions
+git push origin feat/explicador-markdown:main --force
